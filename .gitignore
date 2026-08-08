@@ -1,0 +1,24 @@
+# Deno
+.deno/
+
+# Coverage
+coverage/
+
+# Supabase local state
+supabase/.temp/
+supabase/.branches/
+supabase/.env
+
+# Environment — never commit real values
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json

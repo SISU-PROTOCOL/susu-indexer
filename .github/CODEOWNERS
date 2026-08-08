@@ -1,0 +1,20 @@
+# CODEOWNERS
+#
+# Owners are automatically requested for review.
+# Replace placeholder handles with real GitHub usernames before enabling branch protection.
+
+*                                   @geeekyfocus
+
+# Integrity-critical indexer logic.
+/supabase/functions/_shared/events.ts       @geeekyfocus
+/supabase/functions/_shared/checkpoint.ts   @geeekyfocus
+/supabase/functions/_shared/auth.ts         @geeekyfocus
+/supabase/functions/_shared/config.ts       @geeekyfocus
+/supabase/functions/_shared/db.ts           @geeekyfocus
+/supabase/functions/_shared/money.ts        @geeekyfocus
+/supabase/functions/indexer/                @geeekyfocus
+/supabase/migrations/                       @geeekyfocus
+/scripts/schedule-indexer.sql               @geeekyfocus
+/SECURITY.md                                @geeekyfocus
+/.github/workflows/                         @geeekyfocus
+/.env.example                               @geeekyfocus

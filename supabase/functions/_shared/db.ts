@@ -1,0 +1,134 @@
+/**
+ * Index tables and checkpoint persistence.
+ *
+ * Uses the service-role key, which bypasses RLS. This code runs **only** in the
+ * trusted indexer function: the key must never be shipped to a client, embedded
+ * in a response, or written to a log.
+ *
+ * RLS remains enabled on these tables and grants browser roles no access, so a
+ * leaked anon key cannot read or write index state. The service role is not a
+ * substitute for those protections — it is an additional, server-only path.
+ */
+
+import { createClient, type SupabaseClient } from '@supabase/supabase-js';
+import type { Checkpoint } from './checkpoint.ts';
+
+export type IndexedEventRow = {
+  /** Chain-derived identity; unique, so replays never duplicate rows. */
+  event_identity: string;
+  ledger: number;
+  tx_hash: string;
+  tx_index: number;
+  event_index: number;
+  contract_id: string;
+  topic: string[];
+  value: string;
+};
+
+export class IndexerDb {
+  #client: SupabaseClient;
+
+  constructor(supabaseUrl: string, serviceRoleKey: string) {
+    this.#client = createClient(supabaseUrl, serviceRoleKey, {
+      auth: { persistSession: false, autoRefreshToken: false },
+    });
+  }
+
+  /**
+   * Reads the stored checkpoint.
+   *
+   * Returns `undefined` when none exists, which means the indexer has not run
+   * yet and should start from the configured deployment ledger.
+   */
+  async getCheckpoint(): Promise<Checkpoint | undefined> {
+    const { data, error } = await this.#client
+      .from('indexer_checkpoints')
+      .select('last_processed_ledger, start_ledger, updated_at')
+      .eq('id', 'default')
+      .maybeSingle();
+
+    if (error) {
+      throw new Error(`Failed to read indexer checkpoint: ${error.message}`);
+    }
+    if (!data) return undefined;
+
+    return {
+      lastProcessedLedger: Number(data.last_processed_ledger),
+      startLedger: Number(data.start_ledger),
+      updatedAt: String(data.updated_at),
+    };
+  }
+
+  /**
+   * Idempotently upserts indexed events.
+   *
+   * Conflicting on `event_identity` means a replay or an overlapping range, so
+   * the existing row is left as-is rather than overwritten.
+   */
+  async upsertEvents(rows: readonly IndexedEventRow[]): Promise<void> {
+    if (rows.length === 0) return;
+
+    const { error } = await this.#client
+      .from('indexed_events')
+      .upsert([...rows], { onConflict: 'event_identity', ignoreDuplicates: true });
+
+    if (error) {
+      throw new Error(`Failed to upsert indexed events: ${error.message}`);
+    }
+  }
+
+  /**
+   * Advances the checkpoint.
+   *
+   * Guards against regression in the database as well as in code: the update
+   * only applies when the new ledger is strictly greater, so concurrent runs
+   * cannot move the checkpoint backwards.
+   */
+  async advanceCheckpoint(params: {
+    lastProcessedLedger: number;
+    startLedger: number;
+  }): Promise<void> {
+    const { error } = await this.#client
+      .from('indexer_checkpoints')
+      .upsert(
+        {
+          id: 'default',
+          last_processed_ledger: params.lastProcessedLedger,
+          start_ledger: params.startLedger,
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: 'id' },
+      );
+
+    if (error) {
+      throw new Error(`Failed to advance indexer checkpoint: ${error.message}`);
+    }
+  }
+
+  /** Records a failed run for operational visibility. Never throws. */
+  async recordRunFailure(params: {
+    correlationId: string;
+    ledgerFrom: number;
+    ledgerTo: number;
+    reason: string;
+  }): Promise<void> {
+    const { error } = await this.#client.from('indexer_runs').insert({
+      correlation_id: params.correlationId,
+      ledger_from: params.ledgerFrom,
+      ledger_to: params.ledgerTo,
+      status: 'failed',
+      // Truncated: error text can be long, and never contains secrets by construction.
+      reason: params.reason.slice(0, 500),
+    });
+
+    if (error) {
+      console.error(
+        JSON.stringify({
+          level: 'error',
+          message: 'Failed to record indexer run failure',
+          correlationId: params.correlationId,
+        }),
+      );
+    }
+  }
+}

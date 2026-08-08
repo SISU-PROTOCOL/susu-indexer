@@ -1,0 +1,37 @@
+{
+  "name": "susu-indexer",
+  "version": "0.1.0",
+  "exports": {},
+  "tasks": {
+    "check": "deno check supabase/functions/indexer/index.ts",
+    "fmt": "deno fmt",
+    "fmt:check": "deno fmt --check",
+    "lint": "deno lint",
+    "test": "deno test --allow-env --allow-net=deno.land,jsr.io,registry.npmjs.org tests/",
+    "test:coverage": "deno test --allow-env --coverage=coverage tests/ && deno coverage coverage"
+  },
+  "fmt": {
+    "useTabs": false,
+    "lineWidth": 100,
+    "indentWidth": 2,
+    "semiColons": true,
+    "singleQuote": true,
+    "exclude": ["coverage", "supabase/migrations"]
+  },
+  "lint": {
+    "rules": {
+      "tags": ["recommended"],
+      "exclude": ["no-explicit-any"]
+    },
+    "exclude": ["coverage"]
+  },
+  "compilerOptions": {
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true
+  },
+  "imports": {
+    "@supabase/supabase-js": "npm:@supabase/supabase-js@2.116.0",
+    "@std/assert": "jsr:@std/assert@^1.0.0"
+  }
+}

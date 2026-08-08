@@ -1,0 +1,125 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  indexer:
+    name: Format, Lint, Typecheck, Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Format check
+        run: deno fmt --check
+
+      - name: Lint
+        run: deno lint
+
+      - name: Typecheck
+        run: deno check supabase/functions/indexer/index.ts
+
+      - name: Test
+        run: deno test --allow-env tests/
+
+      - name: Secret scan (gitleaks)
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  migration-guards:
+    name: Migration Security Guards
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: susu_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/susu_test
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Apply migrations
+        run: |
+          set -euo pipefail
+          for file in supabase/migrations/*.sql; do
+            echo "Applying ${file}"
+            psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$file"
+          done
+
+      - name: Verify RLS is enabled on every exposed table
+        run: |
+          set -euo pipefail
+          offenders=$(psql "$DATABASE_URL" -Atc "
+            select coalesce(string_agg(c.relname, ', '), '')
+            from pg_class c
+            join pg_namespace n on n.oid = c.relnamespace
+            where n.nspname = 'public'
+              and c.relkind = 'r'
+              and c.relrowsecurity = false;
+          ")
+          if [ -n "$offenders" ]; then
+            echo "::error::RLS is not enabled on: $offenders"
+            exit 1
+          fi
+          echo "RLS is enabled on every table in public."
+
+      - name: Verify no unconditionally permissive policies exist
+        run: |
+          set -euo pipefail
+          offenders=$(psql "$DATABASE_URL" -Atc "
+            select coalesce(string_agg(tablename || '.' || policyname, ', '), '')
+            from pg_policies
+            where schemaname = 'public'
+              and (
+                coalesce(qual, '') in ('true', '(true)')
+                or coalesce(with_check, '') in ('true', '(true)')
+              );
+          ")
+          if [ -n "$offenders" ]; then
+            echo "::error::Unconditionally permissive policies found: $offenders"
+            exit 1
+          fi
+          echo "No unconditionally permissive policies found."
+
+      - name: Verify browser roles cannot access indexer tables
+        run: |
+          set -euo pipefail
+          # anon and authenticated must hold no privileges on index tables.
+          leaked=$(psql "$DATABASE_URL" -Atc "
+            select coalesce(string_agg(table_name || ':' || grantee, ', '), '')
+            from information_schema.role_table_grants
+            where table_schema = 'public'
+              and grantee in ('anon', 'authenticated');
+          ")
+          if [ -n "$leaked" ]; then
+            echo "::error::Browser roles hold privileges on: $leaked"
+            exit 1
+          fi
+          echo "anon and authenticated hold no table privileges."
