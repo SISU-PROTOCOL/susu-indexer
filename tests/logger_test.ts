@@ -7,7 +7,7 @@ Deno.test('redact removes flat credential fields', () => {
     password: 'hunter2',
     token: 'abc',
     privateKey: 'SXXX',
-    serviceRoleKey: 'sb_secret_xyz',
+    serviceRoleKey: 'not-a-real-credential',
     apiKey: 'key',
     authorization: 'Bearer abc',
     cookie: 'session=1',
@@ -21,7 +21,7 @@ Deno.test('redact removes flat credential fields', () => {
 Deno.test('redact removes snake_case credential variants', () => {
   const result = redact({
     private_key: 'SXXX',
-    service_role_key: 'sb_secret_xyz',
+    service_role_key: 'not-a-real-credential',
     api_key: 'key',
   }) as Record<string, unknown>;
 
@@ -32,14 +32,14 @@ Deno.test('redact removes snake_case credential variants', () => {
 
 Deno.test('redact removes credentials nested in objects and arrays', () => {
   const output = redact({
-    SUPABASE_SERVICE_ROLE_KEY: 'sb_secret_value',
+    SUPABASE_SERVICE_ROLE_KEY: 'not-a-real-credential',
     nested: { authorization: 'Bearer abc', INDEXER_TASK_SECRET: 'shhh' },
     list: [{ password: 'hunter2' }],
     safe: 'keep-me',
   }) as Record<string, unknown>;
 
   const serialized = JSON.stringify(output);
-  assertEquals(serialized.includes('sb_secret_value'), false);
+  assertEquals(serialized.includes('not-a-real-credential'), false);
   assertEquals(serialized.includes('Bearer abc'), false);
   assertEquals(serialized.includes('shhh'), false);
   assertEquals(serialized.includes('hunter2'), false);

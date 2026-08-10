@@ -89,6 +89,24 @@ alter table public.indexer_runs enable row level security;
 -- ---------------------------------------------------------------------------
 -- Grants: browser roles get nothing; RLS is not a substitute for grants.
 -- ---------------------------------------------------------------------------
+-- `anon` and `authenticated` are Supabase-managed roles and exist in hosted
+-- projects. Plain PostgreSQL (as used by the CI guards) has no Supabase roles,
+-- so create them when absent. This is a no-op against a real project, and never
+-- weakens the revoke below.
+do $$
+begin
+  if not exists (select 1 from pg_roles where rolname = 'anon') then
+    create role anon nologin noinherit;
+  end if;
+  if not exists (select 1 from pg_roles where rolname = 'authenticated') then
+    create role authenticated nologin noinherit;
+  end if;
+  if not exists (select 1 from pg_roles where rolname = 'service_role') then
+    create role service_role nologin noinherit bypassrls;
+  end if;
+end
+$$;
+
 revoke all on public.indexer_checkpoints from anon, authenticated;
 revoke all on public.indexed_events from anon, authenticated;
 revoke all on public.indexer_runs from anon, authenticated;
