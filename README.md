@@ -5,8 +5,9 @@
 Scheduled blockchain indexer for **Susu Protocol**. It reads Soroban contract events, records them
 idempotently in PostgreSQL, and maintains a resumable checkpoint.
 
-> **Status: Phase 0 — scaffolding.** The pipeline, checkpointing and security guards are in place;
-> event decoding for the full contract interface lands in Phase 5. Nothing here is audited.
+> **Status: Phase 5 in progress.** The pipeline, checkpointing and security guards are in place, and
+> every event the contracts emit is decoded and tested against bytes captured from Testnet. The
+> chain-derived financial tables and reconciliation are still to come. Nothing here is audited.
 
 ## What it is not
 
@@ -56,6 +57,7 @@ supabase/
       checkpoint.ts         # ledger ranges, checkpoint advancement, lag
       config.ts             # environment validation
       db.ts                 # index tables + checkpoint persistence
+      decode.ts             # XDR event decoding, strictly validated
       events.ts             # event identity, validation, ordering, dedup
       logger.ts             # structured logging with recursive redaction
       money.ts              # integer-only fee/recipient verification
