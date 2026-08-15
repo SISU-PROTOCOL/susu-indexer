@@ -56,15 +56,15 @@ ordinal is extracted from that token and used as `eventIndex`.
 
 This is worth stating explicitly because the obvious alternative is wrong in a way that only shows
 up under pagination. Deriving the index from an event's position within a response page looks
-correct until a busy range is split across pages, at which point the same event acquires a
-different position, and therefore a different identity, and is indexed a second time.
+correct until a busy range is split across pages, at which point the same event acquires a different
+position, and therefore a different identity, and is indexed a second time.
 
 ### Decoding
 
 `decode.ts` turns base64 XDR into typed events and rejects anything it cannot fully recognise. A
-payload that is merely *almost* understood is never coerced into something plausible: an
-unreadable amount is not zero, and an event with the wrong number of topics is not a near-miss to
-be patched up. Rejected events are counted and skipped; a misread event becomes a wrong balance.
+payload that is merely _almost_ understood is never coerced into something plausible: an unreadable
+amount is not zero, and an event with the wrong number of topics is not a near-miss to be patched
+up. Rejected events are counted and skipped; a misread event becomes a wrong balance.
 
 The expected shapes are asserted against bytes captured from Testnet, in
 `tests/fixtures/chain_events.json`, so the tests fail if the decoder stops agreeing with what the
