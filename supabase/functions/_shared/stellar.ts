@@ -44,10 +44,44 @@ export type RpcEvent = {
 
 export type GetEventsResult = {
   events: RpcEvent[];
-  /** Ledger at which the RPC stopped returning data, if the response was truncated. */
+  /**
+   * Token that continues the scan after the last event in this page.
+   *
+   * Absent means the RPC has no further events to give for this scan.
+   */
   cursor?: string;
-  latestLedger: number;
+  /**
+   * The network's tip at the time of the response, when the RPC reports one.
+   *
+   * Optional because a cursor request carries no ledger bound to fall back to,
+   * and because nothing here depends on it: a caller that needs the chain head
+   * asks for it directly.
+   */
+  latestLedger?: number;
 };
+
+/**
+ * Where a page of events begins.
+ *
+ * The RPC refuses a request that carries both a ledger range and a cursor
+ * (`-32602: ledger ranges and cursor cannot both be set`), so the two are
+ * modelled here as a choice rather than as independent optional fields. The
+ * combination the RPC rejects cannot then be constructed by accident.
+ */
+export type EventPageStart =
+  | {
+    /** The first page of a scan, bounded by a ledger range. */
+    kind: 'range';
+    /** Inclusive. */
+    startLedger: number;
+    /** Exclusive. */
+    endLedger: number;
+  }
+  | {
+    /** A later page, continuing from the RPC's own paging token. */
+    kind: 'cursor';
+    cursor: string;
+  };
 
 export class RpcError extends Error {
   constructor(
@@ -118,18 +152,29 @@ export class SorobanRpcClient {
   }
 
   /**
-   * Fetches contract events in a ledger range.
+   * Fetches one page of contract events.
    *
-   * `startLedger` is inclusive and `endLedger` is exclusive, matching the RPC's
-   * contract. The caller is responsible for bounding the range to stay within
-   * the RPC's own limits.
+   * The first page of a scan passes a ledger range (`endLedger` exclusive, as
+   * confirmed against the RPC); later pages pass the cursor from the previous
+   * response instead. The caller drives the paging, because only it knows where
+   * the range ends.
    */
-  async getEvents(params: {
-    startLedger: number;
-    endLedger: number;
-    contractIds: string[];
-    limit?: number;
-  }): Promise<GetEventsResult> {
+  async getEvents(
+    params: EventPageStart & { contractIds: string[]; limit?: number },
+  ): Promise<GetEventsResult> {
+    const pagination: Record<string, unknown> = { limit: params.limit ?? 100 };
+    const request: Record<string, unknown> = {
+      filters: [{ type: 'contract', contractIds: params.contractIds }],
+      pagination,
+    };
+
+    if (params.kind === 'range') {
+      request['startLedger'] = params.startLedger;
+      request['endLedger'] = params.endLedger;
+    } else {
+      pagination['cursor'] = params.cursor;
+    }
+
     const result = await this.#call<{
       events?: Array<{
         ledger?: number;
@@ -143,12 +188,7 @@ export class SorobanRpcClient {
       }>;
       cursor?: string;
       latestLedger?: number;
-    }>('getEvents', {
-      startLedger: params.startLedger,
-      endLedger: params.endLedger,
-      filters: [{ type: 'contract', contractIds: params.contractIds }],
-      pagination: { limit: params.limit ?? 100 },
-    });
+    }>('getEvents', request);
 
     const events: RpcEvent[] = [];
 
@@ -190,7 +230,7 @@ export class SorobanRpcClient {
     return {
       events,
       cursor: result.cursor,
-      latestLedger: result.latestLedger ?? params.endLedger - 1,
+      latestLedger: result.latestLedger,
     };
   }
 }

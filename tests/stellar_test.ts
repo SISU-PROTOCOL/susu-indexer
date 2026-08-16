@@ -80,6 +80,7 @@ Deno.test('getEvents derives the ledger-scoped ordinal, not the page position', 
       ]),
     async () => {
       const page = await new SorobanRpcClient('https://rpc.test').getEvents({
+        kind: 'range',
         startLedger: 1,
         endLedger: 2,
         contractIds: ['CDXXET64G7U7RVB5ZAQIF5KWF64TO7INOMA5N4DVQUDWAFPQNVY5DC2O'],
@@ -107,6 +108,7 @@ Deno.test('getEvents records whether the emitting call succeeded', async () => {
       ]),
     async () => {
       const page = await new SorobanRpcClient('https://rpc.test').getEvents({
+        kind: 'range',
         startLedger: 1,
         endLedger: 2,
         contractIds: ['CDXXET64G7U7RVB5ZAQIF5KWF64TO7INOMA5N4DVQUDWAFPQNVY5DC2O'],
@@ -131,6 +133,7 @@ Deno.test('getEvents skips entries it cannot identify', async () => {
       ]),
     async () => {
       const page = await new SorobanRpcClient('https://rpc.test').getEvents({
+        kind: 'range',
         startLedger: 1,
         endLedger: 2,
         contractIds: ['CDXXET64G7U7RVB5ZAQIF5KWF64TO7INOMA5N4DVQUDWAFPQNVY5DC2O'],
@@ -151,6 +154,7 @@ Deno.test('getEvents fails loudly on a paging token it cannot parse', async () =
       await assertRejects(
         () =>
           new SorobanRpcClient('https://rpc.test').getEvents({
+            kind: 'range',
             startLedger: 1,
             endLedger: 2,
             contractIds: ['CDXXET64G7U7RVB5ZAQIF5KWF64TO7INOMA5N4DVQUDWAFPQNVY5DC2O'],

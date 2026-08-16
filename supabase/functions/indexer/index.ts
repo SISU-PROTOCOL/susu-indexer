@@ -22,15 +22,13 @@
 
 import { authorizeInvocation } from '../_shared/auth.ts';
 import { canAdvanceCheckpoint, computeLedgerRange, ledgerLag } from '../_shared/checkpoint.ts';
-import { type IndexerConfig, loadConfig } from '../_shared/config.ts';
+import { loadConfig } from '../_shared/config.ts';
 import { type IndexedEventRow, IndexerDb } from '../_shared/db.ts';
 import { buildEventIdentity, compareEventOrder, dedupeByIdentity } from '../_shared/events.ts';
 import { createLogger } from '../_shared/logger.ts';
 import { withRetry } from '../_shared/retry.ts';
+import { fetchRangeEvents } from '../_shared/scan.ts';
 import { type RpcEvent, SorobanRpcClient } from '../_shared/stellar.ts';
-
-/** Maximum events requested from RPC per page. */
-const RPC_PAGE_LIMIT = 100;
 
 /** Bounded retry policy for transient RPC and database failures. */
 const RETRY = { attempts: 4, baseDelayMs: 250, maxDelayMs: 4_000 } as const;
@@ -65,54 +63,6 @@ export function toIndexedRow(event: RpcEvent): IndexedEventRow {
     topic: [...event.topic],
     value: event.value,
   };
-}
-
-/**
- * Fetches every page of events for a ledger range.
- *
- * Pagination is followed until the RPC stops returning data or the range is
- * exhausted, so a busy range is fully indexed rather than silently truncated.
- */
-async function fetchRangeEvents(
-  rpc: SorobanRpcClient,
-  config: IndexerConfig,
-  from: number,
-  to: number,
-): Promise<RpcEvent[]> {
-  const collected: RpcEvent[] = [];
-  let startLedger = from;
-
-  // Bounded: the range is already clamped by maxLedgersPerRun, and each
-  // iteration must strictly advance or the loop exits.
-  while (startLedger <= to) {
-    const page = await withRetry(
-      () =>
-        rpc.getEvents({
-          startLedger,
-          endLedger: to + 1,
-          contractIds: [config.factoryContractId, config.usdcContractId],
-          limit: RPC_PAGE_LIMIT,
-        }),
-      RETRY,
-    );
-
-    if (page.events.length === 0) break;
-
-    collected.push(...page.events);
-
-    const highest = page.events.reduce(
-      (max, event) => (event.ledger > max ? event.ledger : max),
-      startLedger,
-    );
-
-    // Advance past the highest ledger seen. Stop if progress is impossible,
-    // which prevents an infinite loop if the RPC keeps returning the same page.
-    const nextStart = highest > startLedger ? highest : startLedger + 1;
-    if (nextStart <= startLedger) break;
-    startLedger = nextStart;
-  }
-
-  return collected;
 }
 
 export async function handleRequest(request: Request): Promise<Response> {
@@ -170,7 +120,12 @@ export async function handleRequest(request: Request): Promise<Response> {
       truncated: range.truncated,
     });
 
-    const events = await fetchRangeEvents(rpc, config, range.from, range.to);
+    const events = await fetchRangeEvents(
+      rpc,
+      [config.factoryContractId, config.usdcContractId],
+      range.from,
+      range.to,
+    );
 
     const ordered = [...events].sort(compareEventOrder);
     const unique = dedupeByIdentity(ordered, buildEventIdentity);
