@@ -24,6 +24,8 @@ import { authorizeInvocation } from '../_shared/auth.ts';
 import { canAdvanceCheckpoint, computeLedgerRange, ledgerLag } from '../_shared/checkpoint.ts';
 import { loadConfig } from '../_shared/config.ts';
 import { type IndexedEventRow, IndexerDb } from '../_shared/db.ts';
+import { decodeChainEvents } from '../_shared/decode.ts';
+import { discoverGroups } from '../_shared/discovery.ts';
 import { buildEventIdentity, compareEventOrder, dedupeByIdentity } from '../_shared/events.ts';
 import { createLogger } from '../_shared/logger.ts';
 import { withRetry } from '../_shared/retry.ts';
@@ -39,6 +41,7 @@ type RunSummary = {
   ledgerFrom?: number;
   ledgerTo?: number;
   eventsIndexed?: number;
+  groupsDiscovered?: number;
   checkpoint?: number;
   lag?: number;
   reason?: string;
@@ -120,16 +123,51 @@ export async function handleRequest(request: Request): Promise<Response> {
       truncated: range.truncated,
     });
 
-    const events = await fetchRangeEvents(
+    // The watch list: the Factory, the token, and every group seen so far. A
+    // group's events are emitted by its own contract, so without the groups the
+    // indexer would see only the Factory and nothing a group ever did.
+    const knownGroups = await withRetry(() => db.listGroupContractIds(), RETRY);
+    const watched = [config.factoryContractId, config.usdcContractId, ...knownGroups];
+
+    const firstPass = await fetchRangeEvents(rpc, watched, range.from, range.to);
+
+    // The token contract is watched so that the token movements themselves are
+    // on record, but they are not Susu events: decoding them would only reject
+    // them, and reporting that as a problem would be noise about a non-problem.
+    const susuContracts = new Set([config.factoryContractId, ...knownGroups]);
+    const susuEvents = firstPass.filter((event) => susuContracts.has(event.contractId));
+
+    // A group is normally created and used within one range, and the checkpoint
+    // moves past that range at the end of this run. Waiting for the next run to
+    // read the new group's events would skip them permanently, because the next
+    // run begins after the ledgers they are in. So the same range is read again
+    // for the contracts just discovered.
+    //
+    // One extra pass suffices: only the Factory emits `group_created`, and this
+    // pass watches group contracts alone, so it can discover nothing further.
+    const newGroups = discoverGroups(decodeChainEvents(susuEvents).events, watched);
+
+    if (newGroups.length > 0) {
+      logger.info('Discovered groups in range; reading it again for them', {
+        ledgerFrom: range.from,
+        ledgerTo: range.to,
+        groupsDiscovered: newGroups.length,
+      });
+    }
+
+    const secondPass = newGroups.length === 0 ? [] : await fetchRangeEvents(
       rpc,
-      [config.factoryContractId, config.usdcContractId],
+      newGroups.map((group) => group.contract_id),
       range.from,
       range.to,
     );
 
-    const ordered = [...events].sort(compareEventOrder);
+    const ordered = [...firstPass, ...secondPass].sort(compareEventOrder);
     const unique = dedupeByIdentity(ordered, buildEventIdentity);
 
+    // Groups before events: every other fact refers to a group row, and in the
+    // range that discovers a group, both arrive together.
+    await withRetry(() => db.upsertGroups(newGroups), RETRY);
     await withRetry(() => db.upsertEvents(unique.map(toIndexedRow)), RETRY);
 
     // Advance only after the writes succeed, and only if it moves forward.
@@ -146,6 +184,7 @@ export async function handleRequest(request: Request): Promise<Response> {
 
     logger.info('Indexed ledger range', {
       eventsIndexed: unique.length,
+      groupsDiscovered: newGroups.length,
       checkpoint: range.to,
     });
 
@@ -156,6 +195,7 @@ export async function handleRequest(request: Request): Promise<Response> {
         ledgerFrom: range.from,
         ledgerTo: range.to,
         eventsIndexed: unique.length,
+        groupsDiscovered: newGroups.length,
         checkpoint: range.to,
         lag: Math.max(0, latestLedger - range.to),
       },

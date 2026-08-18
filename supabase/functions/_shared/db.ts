@@ -12,6 +12,7 @@
 
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import type { Checkpoint } from './checkpoint.ts';
+import type { NewGroup } from './discovery.ts';
 
 export type IndexedEventRow = {
   /** Chain-derived identity; unique, so replays never duplicate rows. */
@@ -74,6 +75,43 @@ export class IndexerDb {
 
     if (error) {
       throw new Error(`Failed to upsert indexed events: ${error.message}`);
+    }
+  }
+
+  /**
+   * The group contracts the indexer already knows about.
+   *
+   * This is the watch list: a group's events are emitted by its own contract,
+   * so without these the indexer would see only the Factory. The set grows with
+   * every group deployed, which is fine at this scale and revisit-worthy beyond
+   * it — the RPC takes the whole list as a filter on every page.
+   */
+  async listGroupContractIds(): Promise<string[]> {
+    const { data, error } = await this.#client.from('groups').select('contract_id');
+
+    if (error) {
+      throw new Error(`Failed to read indexed group contracts: ${error.message}`);
+    }
+
+    return (data ?? []).map((row) => String(row.contract_id));
+  }
+
+  /**
+   * Records groups the indexer has just discovered.
+   *
+   * Existing rows are left alone. Discovery supplies identity and nothing else,
+   * and the columns it does not set — status, member count, totals — are derived
+   * state that belongs to reconciliation, not to discovery.
+   */
+  async upsertGroups(rows: readonly NewGroup[]): Promise<void> {
+    if (rows.length === 0) return;
+
+    const { error } = await this.#client
+      .from('groups')
+      .upsert([...rows], { onConflict: 'contract_id', ignoreDuplicates: true });
+
+    if (error) {
+      throw new Error(`Failed to upsert groups: ${error.message}`);
     }
   }
 
