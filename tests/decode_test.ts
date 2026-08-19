@@ -8,75 +8,17 @@
  */
 
 import { assertEquals, assertNotEquals } from '@std/assert';
-import { xdr } from '@stellar/stellar-sdk';
+import { decodeChainEvent, decodeChainEvents } from '../supabase/functions/_shared/decode.ts';
 import {
-  decodeChainEvent,
-  decodeChainEvents,
-  type DecodedChainEvent,
-} from '../supabase/functions/_shared/decode.ts';
-import type { RpcEvent } from '../supabase/functions/_shared/stellar.ts';
-import fixture from './fixtures/chain_events.json' with { type: 'json' };
-
-/** Encodes a symbol topic the way the contracts do, rather than by hand. */
-function symbolTopic(value: string): string {
-  return xdr.ScVal.scvSymbol(value).toXDR('base64');
-}
-
-type RawEvent = {
-  ledger: number;
-  txHash: string;
-  transactionIndex: number;
-  contractId: string;
-  id: string;
-  topic: string[];
-  value: string;
-  inSuccessfulContractCall: boolean;
-};
-
-const FACTORY_ID = fixture.factory_contract_id;
-const GROUP_ID = fixture.group_contract_id;
-
-/** Converts a captured event into the shape the RPC client produces. */
-function toRpcEvent(raw: RawEvent): RpcEvent {
-  const ordinal = Number.parseInt(raw.id.slice(raw.id.lastIndexOf('-') + 1), 10);
-  return {
-    ledger: raw.ledger,
-    txHash: raw.txHash,
-    txIndex: raw.transactionIndex,
-    eventIndex: ordinal,
-    id: raw.id,
-    contractId: raw.contractId,
-    topic: raw.topic,
-    value: raw.value,
-    successful: raw.inSuccessfulContractCall,
-  };
-}
-
-const rawFactoryEvents = fixture.factory_events as RawEvent[];
-const rawGroupEvents = fixture.group_events as RawEvent[];
-
-/** Reads a captured event by index, failing loudly if the fixture is short. */
-function rawEvent(source: RawEvent[], index: number): RawEvent {
-  const event = source[index];
-  if (event === undefined) throw new Error(`fixture has no event at index ${index}`);
-  return event;
-}
-
-/** A captured group event in the shape the RPC client produces. */
-function groupEvent(index: number): RpcEvent {
-  return toRpcEvent(rawEvent(rawGroupEvents, index));
-}
-
-const factoryEvents = rawFactoryEvents.map(toRpcEvent);
-const groupEvents = rawGroupEvents.map(toRpcEvent);
-const allEvents = [...factoryEvents, ...groupEvents];
-
-/** Decodes and asserts success, returning the event for further assertions. */
-function decodeOk(event: RpcEvent): DecodedChainEvent {
-  const result = decodeChainEvent(event);
-  if (!result.ok) throw new Error(`expected a decoded event, got: ${result.reason}`);
-  return result.event;
-}
+  allEvents,
+  decodeOk,
+  FACTORY_ID,
+  factoryEvents,
+  GROUP_ID,
+  groupEvent,
+  groupEvents,
+  symbolTopic,
+} from './fixture.ts';
 
 Deno.test('every captured Testnet event decodes', () => {
   const { events, rejected } = decodeChainEvents(allEvents);

@@ -27,6 +27,7 @@ import { type IndexedEventRow, IndexerDb } from '../_shared/db.ts';
 import { decodeChainEvents } from '../_shared/decode.ts';
 import { discoverGroups } from '../_shared/discovery.ts';
 import { buildEventIdentity, compareEventOrder, dedupeByIdentity } from '../_shared/events.ts';
+import { planIngest } from '../_shared/ingest.ts';
 import { createLogger } from '../_shared/logger.ts';
 import { withRetry } from '../_shared/retry.ts';
 import { fetchRangeEvents } from '../_shared/scan.ts';
@@ -41,6 +42,8 @@ type RunSummary = {
   ledgerFrom?: number;
   ledgerTo?: number;
   eventsIndexed?: number;
+  eventsDecoded?: number;
+  eventsRejected?: number;
   groupsDiscovered?: number;
   checkpoint?: number;
   lag?: number;
@@ -135,7 +138,10 @@ export async function handleRequest(request: Request): Promise<Response> {
     // on record, but they are not Susu events: decoding them would only reject
     // them, and reporting that as a problem would be noise about a non-problem.
     const susuContracts = new Set([config.factoryContractId, ...knownGroups]);
-    const susuEvents = firstPass.filter((event) => susuContracts.has(event.contractId));
+    const firstDecoded = decodeChainEvents(
+      dedupeByIdentity([...firstPass].sort(compareEventOrder), buildEventIdentity)
+        .filter((event) => susuContracts.has(event.contractId)),
+    );
 
     // A group is normally created and used within one range, and the checkpoint
     // moves past that range at the end of this run. Waiting for the next run to
@@ -145,7 +151,7 @@ export async function handleRequest(request: Request): Promise<Response> {
     //
     // One extra pass suffices: only the Factory emits `group_created`, and this
     // pass watches group contracts alone, so it can discover nothing further.
-    const newGroups = discoverGroups(decodeChainEvents(susuEvents).events, watched);
+    const newGroups = discoverGroups(firstDecoded.events, watched);
 
     if (newGroups.length > 0) {
       logger.info('Discovered groups in range; reading it again for them', {
@@ -162,13 +168,33 @@ export async function handleRequest(request: Request): Promise<Response> {
       range.to,
     );
 
-    const ordered = [...firstPass, ...secondPass].sort(compareEventOrder);
-    const unique = dedupeByIdentity(ordered, buildEventIdentity);
+    // Both passes are deduplicated by chain identity, so the overlap that a
+    // retried range can produce collapses to one write per event.
+    const raw = dedupeByIdentity(
+      [...firstPass, ...secondPass].sort(compareEventOrder),
+      buildEventIdentity,
+    );
+    const secondDecoded = decodeChainEvents(secondPass);
+    const decoded = dedupeByIdentity(
+      [...firstDecoded.events, ...secondDecoded.events],
+      buildEventIdentity,
+    );
+    const rejected = [...firstDecoded.rejected, ...secondDecoded.rejected];
+
+    if (rejected.length > 0) {
+      // Not fatal, but not expected either: the decoder knows every event the
+      // contracts emit, so an unrecognised one means the interface moved.
+      logger.warn('Skipped events the decoder did not recognise', {
+        rejected: rejected.length,
+        reasons: rejected.slice(0, 5).map((item) => item.reason),
+      });
+    }
 
     // Groups before events: every other fact refers to a group row, and in the
     // range that discovers a group, both arrive together.
     await withRetry(() => db.upsertGroups(newGroups), RETRY);
-    await withRetry(() => db.upsertEvents(unique.map(toIndexedRow)), RETRY);
+    await withRetry(() => db.upsertEvents(raw.map(toIndexedRow)), RETRY);
+    await withRetry(() => db.persistPlan(planIngest(decoded)), RETRY);
 
     // Advance only after the writes succeed, and only if it moves forward.
     if (canAdvanceCheckpoint(checkpoint, range.to)) {
@@ -183,7 +209,9 @@ export async function handleRequest(request: Request): Promise<Response> {
     }
 
     logger.info('Indexed ledger range', {
-      eventsIndexed: unique.length,
+      eventsIndexed: raw.length,
+      eventsDecoded: decoded.length,
+      eventsRejected: rejected.length,
       groupsDiscovered: newGroups.length,
       checkpoint: range.to,
     });
@@ -194,7 +222,9 @@ export async function handleRequest(request: Request): Promise<Response> {
         correlationId,
         ledgerFrom: range.from,
         ledgerTo: range.to,
-        eventsIndexed: unique.length,
+        eventsIndexed: raw.length,
+        eventsDecoded: decoded.length,
+        eventsRejected: rejected.length,
         groupsDiscovered: newGroups.length,
         checkpoint: range.to,
         lag: Math.max(0, latestLedger - range.to),

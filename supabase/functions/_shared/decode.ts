@@ -59,6 +59,15 @@ type EventCoordinates = {
   ledger: number;
   txHash: string;
   txIndex: number;
+  /**
+   * Ledger-scoped event ordinal, taken from the paging token.
+   *
+   * Carried next to `eventId` rather than re-parsed at each use, because the
+   * event identity — the key every derived table shares with `indexed_events` —
+   * is built from it, and a second place to derive it is a second place to get
+   * it wrong.
+   */
+  eventIndex: number;
   /** The RPC's paging token for this event. Unique and stable. */
   eventId: string;
 };
@@ -204,6 +213,7 @@ export function decodeChainEvent(raw: RpcEvent): DecodeResult {
     ledger: raw.ledger,
     txHash: raw.txHash,
     txIndex: raw.txIndex,
+    eventIndex: raw.eventIndex,
     eventId: raw.id,
   };
 

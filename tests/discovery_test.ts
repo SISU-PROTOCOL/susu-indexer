@@ -10,6 +10,7 @@
 import { assertEquals } from '@std/assert';
 import type { DecodedChainEvent } from '../supabase/functions/_shared/decode.ts';
 import { discoverGroups } from '../supabase/functions/_shared/discovery.ts';
+import { allEvents, decodeOk, FACTORY_ID, GROUP_ID } from './fixture.ts';
 
 const FACTORY = `C${'A'.repeat(55)}`;
 const GROUP = `C${'B'.repeat(55)}`;
@@ -28,6 +29,7 @@ function groupCreated(
     ledger: overrides.ledger ?? 100,
     txHash: TX,
     txIndex: 0,
+    eventIndex: 0,
     eventId: '0000000000000000001-0000000000',
     creator: CREATOR,
     group: overrides.group ?? GROUP,
@@ -46,6 +48,7 @@ function join(ledger = 101): DecodedChainEvent {
     ledger,
     txHash: TX,
     txIndex: 0,
+    eventIndex: ledger,
     eventId: `0000000000000000001-${String(ledger).padStart(10, '0')}`,
     member: CREATOR,
     position: 1,
@@ -126,4 +129,29 @@ Deno.test('discovers a new group even when other events are present', () => {
   const events = [join(101), groupCreated(), join(102)];
   const groups = discoverGroups(events, [FACTORY]);
   assertEquals(groups.map((group) => group.contract_id), [GROUP]);
+});
+
+// ---------------------------------------------------------------------------
+// Against real events
+// ---------------------------------------------------------------------------
+
+Deno.test('discovers every group announced in a real range', () => {
+  // The captured range announces six groups and carries the whole lifecycle of
+  // the last of them, so this exercises discovery against the bytes Testnet
+  // actually produced rather than against a tidy single-group case.
+  const decoded = allEvents.map(decodeOk);
+
+  const unknown = discoverGroups(decoded, [FACTORY_ID]);
+
+  assertEquals(unknown.length, 6);
+  assertEquals(unknown.map((group) => group.group_id), [6, 7, 8, 9, 10, 11]);
+  assertEquals(unknown.some((group) => group.contract_id === GROUP_ID), true);
+  assertEquals(unknown.every((group) => group.factory_contract_id === FACTORY_ID), true);
+});
+
+Deno.test('a group already watched is not discovered again', () => {
+  const decoded = allEvents.map(decodeOk);
+
+  // Five remain once the one whose lifecycle is here is already on the list.
+  assertEquals(discoverGroups(decoded, [FACTORY_ID, GROUP_ID]).length, 5);
 });

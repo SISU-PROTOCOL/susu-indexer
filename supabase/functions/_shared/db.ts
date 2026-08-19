@@ -13,6 +13,7 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import type { Checkpoint } from './checkpoint.ts';
 import type { NewGroup } from './discovery.ts';
+import type { IngestPlan } from './ingest.ts';
 
 export type IndexedEventRow = {
   /** Chain-derived identity; unique, so replays never duplicate rows. */
@@ -112,6 +113,41 @@ export class IndexerDb {
 
     if (error) {
       throw new Error(`Failed to upsert groups: ${error.message}`);
+    }
+  }
+
+  /**
+   * Records a run's projected events.
+   *
+   * Groups must already be written: every fact table refers to a group row, and
+   * in the range that discovers a group, the group and its facts arrive
+   * together.
+   *
+   * Every write ignores rows that already exist. A replay, an overlapping range
+   * and a retried failure therefore all do the same thing, so the index cannot
+   * be corrupted by running the same ledger twice.
+   */
+  async persistPlan(plan: IngestPlan): Promise<void> {
+    await this.#insertIgnoringDuplicates('decoded_events', plan.decoded, 'event_identity');
+    await this.#insertIgnoringDuplicates('group_members', plan.members, 'contract_id,member');
+    await this.#insertIgnoringDuplicates('contributions', plan.contributions, 'event_identity');
+    await this.#insertIgnoringDuplicates('payouts', plan.payouts, 'event_identity');
+    await this.#insertIgnoringDuplicates('protocol_fees', plan.fees, 'event_identity');
+  }
+
+  async #insertIgnoringDuplicates(
+    table: string,
+    rows: readonly object[],
+    onConflict: string,
+  ): Promise<void> {
+    if (rows.length === 0) return;
+
+    const { error } = await this.#client
+      .from(table)
+      .upsert([...rows], { onConflict, ignoreDuplicates: true });
+
+    if (error) {
+      throw new Error(`Failed to record ${table}: ${error.message}`);
     }
   }
 
