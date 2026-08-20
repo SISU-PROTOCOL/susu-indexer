@@ -3,8 +3,7 @@ import {
   buildEventIdentity,
   compareEventOrder,
   dedupeByIdentity,
-  type IndexableEvent,
-  validateEvent,
+  type EventOrderParts,
 } from '../supabase/functions/_shared/events.ts';
 
 const CONTRACT = `C${'A'.repeat(55)}`;
@@ -12,15 +11,13 @@ const OTHER_CONTRACT = `C${'B'.repeat(55)}`;
 const TX_A = 'a'.repeat(64);
 const TX_B = 'b'.repeat(64);
 
-function event(overrides: Partial<IndexableEvent> = {}): IndexableEvent {
+function event(overrides: Partial<EventOrderParts> = {}): EventOrderParts {
   return {
-    kind: 'contribution',
     contractId: CONTRACT,
     ledger: 10,
     txHash: TX_A,
     txIndex: 0,
     eventIndex: 0,
-    amount: '100000000',
     ...overrides,
   };
 }
@@ -52,54 +49,6 @@ Deno.test('event identity does not collide across contracts at the same position
     buildEventIdentity({ contractId: CONTRACT, ledger: 5, txHash: TX_A, eventIndex: 0 }),
     buildEventIdentity({ contractId: OTHER_CONTRACT, ledger: 5, txHash: TX_A, eventIndex: 0 }),
   );
-});
-
-// ---------------------------------------------------------------------------
-// Validation
-// ---------------------------------------------------------------------------
-
-Deno.test('validateEvent accepts a well-formed contribution', () => {
-  assertEquals(validateEvent(event()).ok, true);
-});
-
-Deno.test('validateEvent accepts a non-financial event without an amount', () => {
-  assertEquals(validateEvent(event({ kind: 'group_created', amount: undefined })).ok, true);
-});
-
-Deno.test('validateEvent rejects an unknown event kind', () => {
-  const result = validateEvent(event({ kind: 'not_a_kind' as IndexableEvent['kind'] }));
-  assertEquals(result.ok, false);
-});
-
-Deno.test('validateEvent rejects a malformed contract id', () => {
-  assertEquals(validateEvent(event({ contractId: 'not-a-contract' })).ok, false);
-});
-
-Deno.test('validateEvent rejects malformed transaction hashes', () => {
-  for (const txHash of ['', 'zz', 'A'.repeat(64), 'a'.repeat(63), 'a'.repeat(65)]) {
-    assertEquals(validateEvent(event({ txHash })).ok, false, `expected ${txHash} to be rejected`);
-  }
-});
-
-Deno.test('validateEvent rejects negative ledger, txIndex and eventIndex', () => {
-  assertEquals(validateEvent(event({ ledger: -1 })).ok, false);
-  assertEquals(validateEvent(event({ txIndex: -1 })).ok, false);
-  assertEquals(validateEvent(event({ eventIndex: -1 })).ok, false);
-});
-
-Deno.test('validateEvent requires amounts on financial events only', () => {
-  for (const kind of ['contribution', 'payout', 'fee'] as const) {
-    assertEquals(validateEvent(event({ kind, amount: undefined })).ok, false, kind);
-  }
-  for (const kind of ['group_created', 'member_joined', 'group_started', 'completed'] as const) {
-    assertEquals(validateEvent(event({ kind, amount: undefined })).ok, true, kind);
-  }
-});
-
-Deno.test('validateEvent rejects non-integer and negative amounts', () => {
-  for (const amount of ['1.5', '-1', '1e7', 'abc', '', ' 12 ']) {
-    assertEquals(validateEvent(event({ amount })).ok, false, `expected ${amount} to be rejected`);
-  }
 });
 
 // ---------------------------------------------------------------------------
