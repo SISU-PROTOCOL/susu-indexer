@@ -5,9 +5,11 @@
 Scheduled blockchain indexer for **Susu Protocol**. It reads Soroban contract events, records them
 idempotently in PostgreSQL, and maintains a resumable checkpoint.
 
-> **Status: Phase 5 in progress.** The pipeline, checkpointing and security guards are in place, and
-> every event the contracts emit is decoded and tested against bytes captured from Testnet. The
-> chain-derived financial tables and reconciliation are still to come. Nothing here is audited.
+> **Status: Phase 5 code complete, not yet deployed.** The pipeline decodes every event the
+> contracts emit against bytes captured from Testnet, discovers each group contract from the
+> Factory's announcements, projects those events into chain-derived tables and recomputes each
+> group's state from the facts. What is unproven is the deployment path: this has not yet run
+> against a live Supabase project and a live RPC. Nothing here is audited.
 
 ## What it is not
 
@@ -46,6 +48,22 @@ A dedicated always-on worker is a later production optimization, not an MVP requ
 Each invocation processes at most `INDEXER_MAX_LEDGER_RANGE` ledgers and exits, so it stays within
 its execution budget. Progress is durable; the next run continues where this one stopped.
 
+### Chain-derived tables, reconciled rather than trusted
+
+`decoded_events` and the tables below it (`groups`, `group_members`, `contributions`, `payouts`,
+`protocol_fees`) are projections of chain events, not records in their own right. Every figure read
+back from them — member count, round, totals — is recomputed from those rows on each run rather than
+incremented, so a replayed range corrects a total instead of doubling it.
+
+Amounts are `numeric(39,0)` in the database, because the largest `i128` is 39 digits, and `BigInt`
+in the code. A read that forgets its `::text` cast fails loudly rather than rounding: PostgREST
+renders `numeric` as a JSON number, and JavaScript loses integers above 2^53 without saying so.
+
+The chain remains the authority. A group's events are emitted by an address nobody knows in advance,
+so the indexer learns it from the Factory's `group_created` event and reads that ledger range a
+second time for it — the checkpoint only moves forward, and a group created and used inside one
+range would otherwise be skipped permanently.
+
 ## Layout
 
 ```text
@@ -56,12 +74,16 @@ supabase/
       auth.ts               # constant-time invocation authorisation
       checkpoint.ts         # ledger ranges, checkpoint advancement, lag
       config.ts             # environment validation
-      db.ts                 # index tables + checkpoint persistence
+      db.ts                 # index tables, chain-derived tables, checkpoints
       decode.ts             # XDR event decoding, strictly validated
-      events.ts             # event identity, validation, ordering, dedup
+      discovery.ts          # finds group contracts from factory events
+      events.ts             # event identity, ordering, deduplication
+      ingest.ts             # decoded events -> chain-derived rows
       logger.ts             # structured logging with recursive redaction
       money.ts              # integer-only fee/recipient verification
       retry.ts              # bounded exponential backoff
+      scan.ts               # reads a ledger range in full, by cursor
+      state.ts              # derives group state from recorded facts
       stellar.ts            # minimal read-only Soroban RPC client
   migrations/               # schema, RLS, grants
 scripts/
@@ -110,7 +132,11 @@ deno task test
   resumes from the checkpoint automatically.
 - **Full rebuild:** reset `indexer_checkpoints` to the deployment ledger and let the indexer
   re-scan. Event identity makes this safe.
-- **Reconciliation:** compare index state against contract state; the chain is authoritative.
+- **Groups missing from the index:** a group is only learned from the Factory's `group_created`
+  event inside a range that is read. If that range was processed before group discovery existed, its
+  events were never read and the checkpoint has moved past them — only a rebuild re-reads them.
+- **Reconciliation:** each touched group's state is recomputed from its recorded facts on every run
+  and written back; divergence is logged. A difference means the index was wrong, never the chain.
 
 See [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
 

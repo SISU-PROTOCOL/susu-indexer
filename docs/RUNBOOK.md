@@ -53,11 +53,30 @@ manager for the duration of the command.
 
 ### Index state diverges from chain state
 
-1. Identify the affected range from the checkpoint and the contract's ledger.
-2. Inspect the transactions and events on-chain first. Assume the chain is correct.
-3. Repair by re-indexing the range: reset the checkpoint to the ledger **before** the divergence and
-   let the indexer re-scan. Event identity makes this idempotent.
-4. Verify the repaired rows against chain state.
+A group's derived figures are recomputed from its recorded facts on every run, and a disagreement
+with what was stored is logged as
+`Group state disagreed with the recorded facts; repaired from
+them`, with a `divergences` count and
+up to five `examples` naming the field, the stored value, and the derived one.
+
+1. Read the logged divergence.
+2. If a fact is missing rather than wrong, the fault is in discovery or paging rather than in state
+   derivation — re-indexing repairs the symptom, but the cause is the bug to fix.
+3. Confirm the repaired figures against chain state.
+
+### A group's activity is missing or incomplete
+
+A group is only ever learned about from the Factory's `group_created` event, and only from inside a
+range that is read. The checkpoint has already moved past that range by the time the symptom is
+visible, so a rebuild is required. Two distinct faults produce the same symptom:
+
+- the range was processed before group discovery existed, so the group's contract was never watched;
+- the range was read incompletely, so some of its events were never fetched.
+
+1. Confirm the group exists on-chain and note its creation ledger.
+2. Reset the checkpoint to the ledger **before** that group's creation ledger (see below).
+3. Let runs work forward, then confirm the group appears in `groups` with its facts in
+   `group_members`, `contributions`, `payouts` and `protocol_fees`.
 
 ### Full rebuild
 
@@ -70,9 +89,10 @@ manager for the duration of the command.
    where id = 'default';
    ```
 3. Let scheduled runs work through the history. Progress is durable between runs.
-4. Optionally truncate `indexed_events` first if a clean rebuild is preferred — the indexer will
-   repopulate it. Never truncate anything the contracts depend on; nothing off-chain is a dependency
-   of the contracts.
+4. Optionally truncate `indexed_events` and the chain-derived tables (`decoded_events`, `groups`,
+   `group_members`, `contributions`, `payouts`, `protocol_fees`) first if a clean rebuild is
+   preferred — the indexer repopulates all of them. Never truncate anything the contracts depend on;
+   nothing off-chain is a dependency of the contracts.
 
 ### The invocation secret is compromised
 
