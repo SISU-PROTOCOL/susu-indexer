@@ -26,27 +26,35 @@ public.invoke_indexer()  ──HTTP──>  Edge Function `indexer`
                                         ├─ authorise (constant-time secret compare)
                                         ├─ load checkpoint + chain tip
                                         ├─ compute bounded ledger range
-                                        ├─ fetch events (paginated, retried)
+                                        ├─ read the watch list (factory, token, known groups)
+                                        ├─ fetch events (cursor-paged, retried)
                                         ├─ decode XDR into typed events
-                                        ├─ validate, order, deduplicate
-                                        ├─ upsert by event identity
+                                        ├─ discover groups announced in this range
+                                        ├─ re-read the range for the groups just discovered
+                                        ├─ order, deduplicate by event identity
+                                        ├─ record raw events, then project the facts
+                                        ├─ recompute each touched group's state
                                         └─ advance checkpoint (forward only)
 ```
 
 ## Guarantees
 
-| Guarantee                | Mechanism                                                                        |
-| ------------------------ | -------------------------------------------------------------------------------- |
-| No duplicate rows        | Unique `event_identity` (`contractId:ledger:txHash:eventIndex`)                  |
-| Stable event identity    | `eventIndex` is the ledger-scoped ordinal from the RPC's paging token            |
-| Only successful calls    | Events from failed contract calls are never indexed                              |
-| Replay-safe              | Upserts ignore conflicts rather than overwriting                                 |
-| No skipped ledgers       | Range resumes at `checkpoint + 1`; checkpoint advances only after writes succeed |
-| Bounded runtime          | Range capped at `INDEXER_MAX_LEDGER_RANGE` per run                               |
-| Retryable failures       | Bounded exponential backoff; checkpoint untouched on failure                     |
-| Not publicly triggerable | Shared secret, constant-time comparison, fails closed                            |
-| No credential leakage    | Recursive log redaction; secret read from Vault at call time                     |
-| Browser isolation        | RLS enabled with no policies; `anon`/`authenticated` revoked                     |
+| Guarantee                      | Mechanism                                                                        |
+| ------------------------------ | -------------------------------------------------------------------------------- |
+| No duplicate rows              | Unique `event_identity` (`contractId:ledger:txHash:eventIndex`)                  |
+| Stable event identity          | `eventIndex` is the ledger-scoped ordinal from the RPC's paging token            |
+| Only successful calls          | Events from failed contract calls are never indexed                              |
+| Replay-safe                    | Upserts ignore conflicts rather than overwriting                                 |
+| Exact money                    | Amounts are summed as `BigInt`; `numeric` is read with an explicit `::text` cast |
+| State derived, not accumulated | Totals are recomputed from facts, so a replay corrects rather than inflates      |
+| No skipped ledgers             | Range resumes at `checkpoint + 1`; checkpoint advances only after writes succeed |
+| Complete range reads           | Paging follows the RPC's cursor; a full page without one fails the run           |
+| Group events are indexed       | Group contracts are discovered from `group_created` and read in the same run     |
+| Bounded runtime                | Range capped at `INDEXER_MAX_LEDGER_RANGE` per run                               |
+| Retryable failures             | Bounded exponential backoff; checkpoint untouched on failure                     |
+| Not publicly triggerable       | Shared secret, constant-time comparison, fails closed                            |
+| No credential leakage          | Recursive log redaction; secret read from Vault at call time                     |
+| Browser isolation              | RLS enabled with no policies; `anon`/`authenticated` revoked                     |
 
 ### Event identity
 
@@ -76,7 +84,50 @@ Contract events are emitted during failed calls as well as successful ones. Inde
 record a contribution or a payout that never happened, so an event whose emitting call did not
 succeed — or whose status the RPC did not state — is not indexed.
 
+### Reading a range in full
+
+The checkpoint only moves forward, so a range that is read incompletely is never read again:
+whatever the missing events said about money moving is simply absent, and absent looks exactly like
+never happened. Paging therefore follows the RPC's own cursor, and a full page that arrives without
+one fails the run rather than being treated as the end. The checkpoint is left alone, so the range
+is retried.
+
+An earlier version advanced the next request's `startLedger` to the highest ledger in the previous
+page. A page filled entirely by one ledger — a busy group, a payout round — left that ledger's
+remaining events on the far side of the boundary and skipped them.
+
+### Watching a group
+
+The Factory deploys each group as its own contract, so a group's events are emitted by an address
+nobody knows in advance. The only place it appears is the Factory's `group_created` event.
+
+That makes discovery a prerequisite for reading anything a group does, and it puts discovery and the
+checkpoint in tension: a group is normally created and used within a single range, and the
+checkpoint moves past that range when the run ends. Registering the group and waiting for the next
+run to read its events would skip them permanently, because the next run begins after the ledgers
+they are in. The range is read a second time instead, for the contracts discovered in it.
+
+One extra pass is enough. Only the Factory emits `group_created`, and the second pass watches group
+contracts alone, so it cannot discover anything further.
+
+### Derived state and reconciliation
+
+Group state is never accumulated. Every figure — member count, round, totals — is recomputed from
+the recorded facts by `state.ts`, and written back. A running total maintained by deltas would
+double-count the first time a range was replayed, and nothing downstream could tell that it had.
+
+This is what makes "the chain wins and reconciliation repairs the index" a property of the code
+rather than an intention: if stored state disagrees with the facts, recomputing overwrites it.
+Divergence is logged rather than merely corrected, because state that drifted without a replay means
+something else is wrong.
+
+A group that has never been derived is not reported as divergent. Discovery writes placeholder
+figures, so the first derivation always differs from them, and treating that as drift would bury the
+real signal in first-run noise. `last_event_ledger` is the marker: zero means no derivation has run.
+
 ## Storage
+
+Operational tables:
 
 | Table                 | Purpose                                                  |
 | --------------------- | -------------------------------------------------------- |
@@ -84,9 +135,29 @@ succeed — or whose status the RPC did not state — is not indexed.
 | `indexed_events`      | Raw chain events, deduplicated by chain-derived identity |
 | `indexer_runs`        | Append-only run log for monitoring and alerting          |
 
-These are operational tables, not financial records. Chain-derived financial tables
-(`contributions`, `payouts`, `transactions`) are added in Phase 5 and follow the same restrictions:
-written only by trusted server paths, never by browser clients.
+Chain-derived tables, each rebuildable from the one before it:
+
+| Table            | Purpose                                                     |
+| ---------------- | ----------------------------------------------------------- |
+| `decoded_events` | Every event the decoder understood, with amounts as strings |
+| `groups`         | Groups, their terms, and the indexer's watch list           |
+| `group_members`  | Membership in the position the chain assigned               |
+| `contributions`  | One row per contribution                                    |
+| `payouts`        | One row per payout, net of the protocol fee                 |
+| `protocol_fees`  | The treasury's share of each payout                         |
+
+The chain remains authoritative for all of them. They carry the constraints the chain enforces — one
+contribution per member per round, one payout per round, one member per position — so a wrong
+reading of the events fails loudly at the write instead of being trusted.
+
+Amounts are `numeric(39,0)`, because the largest `i128` is 39 digits and `bigint` would overflow it.
+Reads that cross into JavaScript must cast to `text`: PostgREST renders `numeric` as a JSON number,
+and JavaScript loses integers above 2^53. The reads in `db.ts` do this, and `sumAmounts` refuses a
+value that is not an integer string, so dropping a cast fails loudly rather than rounding a total in
+silence.
+
+No table here is reachable from a browser. RLS is enabled with no policies on every one of them, and
+`anon` and `authenticated` hold no privileges.
 
 ## Deliberate non-goals
 

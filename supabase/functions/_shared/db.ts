@@ -14,6 +14,23 @@ import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import type { Checkpoint } from './checkpoint.ts';
 import type { NewGroup } from './discovery.ts';
 import type { IngestPlan } from './ingest.ts';
+import type { GroupFacts, GroupState, StoredGroupState } from './state.ts';
+
+/**
+ * Facts as they are accumulated while reading.
+ *
+ * The arrays are mutable so they can be pushed to; `GroupFacts` accepts them
+ * because a mutable array is assignable to a readonly one.
+ */
+type MutableFacts = {
+  members: { position: number }[];
+  contributions: { round: number; amount: string }[];
+  payouts: { round: number; recipient_amount: string }[];
+  fees: { round: number; fee: string }[];
+  started: boolean;
+  completed: boolean;
+  lastEventLedger: number;
+};
 
 export type IndexedEventRow = {
   /** Chain-derived identity; unique, so replays never duplicate rows. */
@@ -149,6 +166,158 @@ export class IndexerDb {
     if (error) {
       throw new Error(`Failed to record ${table}: ${error.message}`);
     }
+  }
+
+  /**
+   * Reads the facts a group's state is derived from.
+   *
+   * Money columns are read through an explicit `::text` cast. PostgREST renders
+   * `numeric` as a JSON *number*, and JavaScript loses integers above 2^53, so
+   * reading one without the cast would silently round a total before any of our
+   * code saw it. `sumAmounts` refuses a value that is not an integer string, so
+   * dropping a cast here fails loudly rather than quietly.
+   */
+  async readGroupFacts(contractIds: readonly string[]): Promise<Map<string, GroupFacts>> {
+    const facts = new Map<string, GroupFacts>();
+    if (contractIds.length === 0) return facts;
+
+    const ids = [...contractIds];
+
+    const forGroup = (contractId: string): MutableFacts => {
+      let existing = facts.get(contractId) as MutableFacts | undefined;
+      if (existing === undefined) {
+        existing = {
+          members: [],
+          contributions: [],
+          payouts: [],
+          fees: [],
+          started: false,
+          completed: false,
+          lastEventLedger: 0,
+        };
+        facts.set(contractId, existing);
+      }
+      return existing;
+    };
+
+    const rows = await Promise.all([
+      this.#selectIn('group_members', 'contract_id, position', ids),
+      this.#selectIn('contributions', 'contract_id, round, amount::text', ids),
+      this.#selectIn('payouts', 'contract_id, round, recipient_amount::text', ids),
+      this.#selectIn('protocol_fees', 'contract_id, round, fee::text', ids),
+      // Lifecycle and the last ledger the group was heard from. `start` and
+      // `completed` are the only events that change its status, and both are
+      // emitted by the group itself.
+      this.#selectIn('decoded_events', 'contract_id, name, ledger', ids),
+    ]);
+
+    const [members, contributions, payouts, fees, events] = rows as [
+      Record<string, unknown>[],
+      Record<string, unknown>[],
+      Record<string, unknown>[],
+      Record<string, unknown>[],
+      Record<string, unknown>[],
+    ];
+
+    for (const row of members) {
+      forGroup(String(row['contract_id'])).members.push({ position: Number(row['position']) });
+    }
+    for (const row of contributions) {
+      forGroup(String(row['contract_id'])).contributions.push({
+        round: Number(row['round']),
+        amount: String(row['amount']),
+      });
+    }
+    for (const row of payouts) {
+      forGroup(String(row['contract_id'])).payouts.push({
+        round: Number(row['round']),
+        recipient_amount: String(row['recipient_amount']),
+      });
+    }
+    for (const row of fees) {
+      forGroup(String(row['contract_id'])).fees.push({
+        round: Number(row['round']),
+        fee: String(row['fee']),
+      });
+    }
+    for (const row of events) {
+      const group = forGroup(String(row['contract_id']));
+      const name = String(row['name']);
+      const ledger = Number(row['ledger']);
+
+      if (name === 'start') group.started = true;
+      if (name === 'completed') group.completed = true;
+      if (ledger > group.lastEventLedger) group.lastEventLedger = ledger;
+    }
+
+    return facts;
+  }
+
+  /** Reads the derived state currently stored for the given groups. */
+  async readGroupState(contractIds: readonly string[]): Promise<Map<string, StoredGroupState>> {
+    const states = new Map<string, StoredGroupState>();
+    if (contractIds.length === 0) return states;
+
+    const rows = await this.#selectIn(
+      'groups',
+      'contract_id, status, member_count, current_round, completed_rounds, ' +
+        'contributed_total::text, paid_out_total::text, fee_total::text, last_event_ledger',
+      contractIds,
+    );
+
+    for (const row of rows) {
+      states.set(String(row['contract_id']), {
+        status: String(row['status']) as StoredGroupState['status'],
+        member_count: Number(row['member_count']),
+        current_round: Number(row['current_round']),
+        completed_rounds: Number(row['completed_rounds']),
+        contributed_total: String(row['contributed_total']),
+        paid_out_total: String(row['paid_out_total']),
+        fee_total: String(row['fee_total']),
+        last_event_ledger: Number(row['last_event_ledger']),
+      });
+    }
+
+    return states;
+  }
+
+  /**
+   * Writes derived state.
+   *
+   * An upsert rather than an insert-ignoring-duplicates, because this is the one
+   * place the index deliberately overwrites itself: the derived figures replace
+   * whatever was stored, which is what repairs a drift.
+   */
+  async upsertGroupState(states: readonly GroupState[]): Promise<void> {
+    if (states.length === 0) return;
+
+    const rows = states.map((state) => ({ ...state, updated_at: new Date().toISOString() }));
+    const { error } = await this.#client
+      .from('groups')
+      .upsert(rows, { onConflict: 'contract_id' });
+
+    if (error) {
+      throw new Error(`Failed to record group state: ${error.message}`);
+    }
+  }
+
+  async #selectIn(
+    table: string,
+    columns: string,
+    contractIds: readonly string[],
+  ): Promise<Record<string, unknown>[]> {
+    const { data, error } = await this.#client
+      .from(table)
+      .select(columns)
+      .in('contract_id', [...contractIds]);
+
+    if (error) {
+      throw new Error(`Failed to read ${table}: ${error.message}`);
+    }
+
+    // The column list is dynamic, so the client's inferred row type is not
+    // usable here. Callers coerce each field they read.
+    return (data ?? []) as unknown as Record<string, unknown>[];
   }
 
   /**

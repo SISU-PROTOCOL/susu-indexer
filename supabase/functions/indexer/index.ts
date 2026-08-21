@@ -31,6 +31,7 @@ import { planIngest } from '../_shared/ingest.ts';
 import { createLogger } from '../_shared/logger.ts';
 import { withRetry } from '../_shared/retry.ts';
 import { fetchRangeEvents } from '../_shared/scan.ts';
+import { compareGroupState, deriveGroupState, NO_FACTS } from '../_shared/state.ts';
 import { type RpcEvent, SorobanRpcClient } from '../_shared/stellar.ts';
 
 /** Bounded retry policy for transient RPC and database failures. */
@@ -69,6 +70,32 @@ export function toIndexedRow(event: RpcEvent): IndexedEventRow {
     topic: [...event.topic],
     value: event.value,
   };
+}
+
+/**
+ * Recomputes each group's state from the facts on record, and writes it back.
+ *
+ * Returns the figures that disagreed with what was stored. The derived values
+ * are written either way, so this is a report rather than a decision: the repair
+ * is the write that follows it.
+ */
+async function reconcileGroups(
+  db: IndexerDb,
+  contractIds: readonly string[],
+): Promise<string[]> {
+  if (contractIds.length === 0) return [];
+
+  const facts = await withRetry(() => db.readGroupFacts(contractIds), RETRY);
+  const states = contractIds.map((id) => deriveGroupState(id, facts.get(id) ?? NO_FACTS));
+
+  const stored = await withRetry(() => db.readGroupState(contractIds), RETRY);
+  const divergences = states.flatMap((state) =>
+    compareGroupState(stored.get(state.contract_id), state)
+  );
+
+  await withRetry(() => db.upsertGroupState(states), RETRY);
+
+  return divergences;
 }
 
 export async function handleRequest(request: Request): Promise<Response> {
@@ -194,7 +221,19 @@ export async function handleRequest(request: Request): Promise<Response> {
     // range that discovers a group, both arrive together.
     await withRetry(() => db.upsertGroups(newGroups), RETRY);
     await withRetry(() => db.upsertEvents(raw.map(toIndexedRow)), RETRY);
-    await withRetry(() => db.persistPlan(planIngest(decoded)), RETRY);
+
+    const plan = planIngest(decoded);
+    await withRetry(() => db.persistPlan(plan), RETRY);
+
+    // Recompute rather than accumulate: a range processed twice corrects the
+    // figures instead of inflating them.
+    const divergences = await reconcileGroups(db, plan.touchedGroups);
+    if (divergences.length > 0) {
+      logger.warn('Group state disagreed with the recorded facts; repaired from them', {
+        divergences: divergences.length,
+        examples: divergences.slice(0, 5),
+      });
+    }
 
     // Advance only after the writes succeed, and only if it moves forward.
     if (canAdvanceCheckpoint(checkpoint, range.to)) {
