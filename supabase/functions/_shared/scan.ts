@@ -27,6 +27,18 @@ import type { EventPageStart, GetEventsResult, RpcEvent } from './stellar.ts';
 export const PAGE_LIMIT = 100;
 
 /**
+ * Most contract IDs the RPC accepts in one filter.
+ *
+ * A hard server-side limit, enforced with `-32602: filter 1 invalid: maximum 5
+ * contract IDs per filter`. It is not a documented budget to plan against but an
+ * error to avoid, which is why the scan splits its watch list rather than
+ * assuming the list stays small. Beyond five groups in one ledger range the
+ * second discovery pass sends one ID per group, so a protocol with six groups
+ * fails every run until this is respected.
+ */
+export const MAX_CONTRACT_IDS_PER_FILTER = 5;
+
+/**
  * Hard cap on pages fetched for one range.
  *
  * The cursor is the loop's own condition, so a cursor that stopped advancing
@@ -54,6 +66,17 @@ export type EventSource = {
  * Fetches every event emitted by `contractIds` in the ledger range `from`..`to`
  * (inclusive at both ends).
  *
+ * The watch list is split into filters the RPC will accept, and each is scanned
+ * to completion. Splitting is not an optimisation: the RPC rejects a filter
+ * carrying more than five contract IDs outright, so a watch list that outgrows
+ * one filter would otherwise fail every run rather than degrade.
+ *
+ * Each contract appears in exactly one chunk, so an event is returned once and
+ * the caller's ordering is all that remains to restore. The chunks are read one
+ * after another rather than concurrently: the RPC is a shared public endpoint,
+ * and a dozen parallel scans are a good way to be rate limited part-way through
+ * a range that then cannot be advanced.
+ *
  * Throws rather than returning a partial result whenever it cannot prove the
  * range was read in full. A partial result would be recorded and the checkpoint
  * advanced past it, which is indistinguishable from the events never existing.
@@ -69,8 +92,29 @@ export async function fetchRangeEvents(
     throw new Error(`invalid ledger range: ${from}-${to}`);
   }
 
-  const ids = [...contractIds];
+  // De-duplicated first: a repeated ID would consume one of the five slots to
+  // fetch the same events twice.
+  const unique = [...new Set(contractIds)];
+  const chunks: string[][] = [];
+  for (let i = 0; i < unique.length; i += MAX_CONTRACT_IDS_PER_FILTER) {
+    chunks.push(unique.slice(i, i + MAX_CONTRACT_IDS_PER_FILTER));
+  }
 
+  const collected: RpcEvent[] = [];
+  for (const chunk of chunks) {
+    collected.push(...(await fetchChunk(rpc, chunk, from, to)));
+  }
+
+  return collected;
+}
+
+/** Reads the whole range for one filter's worth of contracts. */
+async function fetchChunk(
+  rpc: EventSource,
+  ids: string[],
+  from: number,
+  to: number,
+): Promise<RpcEvent[]> {
   const fetchPage = (start: EventPageStart): Promise<GetEventsResult> =>
     withRetry(() => rpc.getEvents({ ...start, contractIds: ids, limit: PAGE_LIMIT }), RETRY);
 

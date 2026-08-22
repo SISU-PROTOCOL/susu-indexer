@@ -10,6 +10,7 @@ import { assertEquals, assertRejects } from '@std/assert';
 import {
   type EventSource,
   fetchRangeEvents,
+  MAX_CONTRACT_IDS_PER_FILTER,
   PAGE_LIMIT,
 } from '../supabase/functions/_shared/scan.ts';
 import type {
@@ -212,4 +213,89 @@ Deno.test('carries the contract filter on every page', async () => {
 
   assertEquals(source.requests.every((r) => r.contractIds.length === 1), true);
   assertEquals(source.requests.every((r) => r.contractIds[0] === CONTRACT), true);
+});
+
+// ---------------------------------------------------------------------------
+// The RPC's five-contract-per-filter limit
+// ---------------------------------------------------------------------------
+
+/** `count` distinct, structurally valid contract addresses. */
+function contractIds(count: number): string[] {
+  return Array.from(
+    { length: count },
+    (_, i) => `C${'A'.repeat(54)}${'23456789ABCDEFGHJKLMNPQRSTUVWXYZ'[i]}`,
+  );
+}
+
+Deno.test('splits a watch list the RPC would reject', async () => {
+  // Regression. The RPC answers `-32602: filter 1 invalid: maximum 5 contract
+  // IDs per filter`, so the second discovery pass — one ID per newly found
+  // group — fails outright from the sixth group onwards. Against a live network
+  // that is every run failing, not a degraded one.
+  const ids = contractIds(6);
+  const source = scriptedSource([
+    { events: eventsIn(1, 1, 0), cursor: 'c1', latestLedger: 10 },
+    { events: eventsIn(2, 1, 1), cursor: 'c2', latestLedger: 10 },
+  ]);
+
+  const events = await fetchRangeEvents(source, ids, 1, 10);
+
+  assertEquals(source.requests.length, 2);
+  assertEquals(
+    source.requests.every((r) => r.contractIds.length <= MAX_CONTRACT_IDS_PER_FILTER),
+    true,
+  );
+  // Every contract is still watched, across the two requests.
+  const watched = new Set(source.requests.flatMap((r) => r.contractIds));
+  assertEquals(watched.size, 6);
+  assertEquals(events.length, 2);
+});
+
+Deno.test('chunks an evenly divisible watch list without an empty trailing request', async () => {
+  const source = scriptedSource([
+    { events: [], cursor: 'c1', latestLedger: 10 },
+    { events: [], cursor: 'c2', latestLedger: 10 },
+  ]);
+
+  await fetchRangeEvents(source, contractIds(10), 1, 10);
+
+  assertEquals(source.requests.length, 2);
+  assertEquals(source.requests.every((r) => r.contractIds.length === 5), true);
+});
+
+Deno.test('sends one request when the watch list fits the limit', async () => {
+  const source = scriptedSource([{ events: [], cursor: 'c1', latestLedger: 10 }]);
+
+  await fetchRangeEvents(source, contractIds(5), 1, 10);
+
+  assertEquals(source.requests.length, 1);
+  assertEquals(source.requests[0]?.contractIds.length, 5);
+});
+
+Deno.test('de-duplicates the watch list so a repeated ID cannot waste a slot', async () => {
+  // A repeat would otherwise consume one of five slots and fetch the same events
+  // twice, breaking the identity dedupe's assumption that one contract is read once.
+  const [a, b] = contractIds(2) as [string, string];
+  const source = scriptedSource([{ events: [], cursor: 'c1', latestLedger: 10 }]);
+
+  await fetchRangeEvents(source, [a, b, a, b, a], 1, 10);
+
+  assertEquals(source.requests.length, 1);
+  assertEquals(source.requests[0]?.contractIds, [a, b]);
+});
+
+Deno.test('reads every chunk in full, not just the first', async () => {
+  // Each chunk pages independently; a chunk left partly read loses its events
+  // even though the other chunk completed, and the checkpoint still advances.
+  const source = scriptedSource([
+    { events: eventsIn(1, PAGE_LIMIT, 0), cursor: 'c1', latestLedger: 10 },
+    { events: eventsIn(2, 3, PAGE_LIMIT), cursor: 'c2', latestLedger: 10 },
+    { events: eventsIn(3, PAGE_LIMIT, 200), cursor: 'c3', latestLedger: 10 },
+    { events: eventsIn(4, 4, 300), cursor: 'c4', latestLedger: 10 },
+  ]);
+
+  const events = await fetchRangeEvents(source, contractIds(6), 1, 10);
+
+  assertEquals(events.length, PAGE_LIMIT + 3 + PAGE_LIMIT + 4);
+  assertEquals(source.requests.length, 4);
 });
