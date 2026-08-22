@@ -96,6 +96,15 @@ An earlier version advanced the next request's `startLedger` to the highest ledg
 page. A page filled entirely by one ledger — a busy group, a payout round — left that ledger's
 remaining events on the far side of the boundary and skipped them.
 
+A range is also read through one filter per five contracts, because that is all the RPC accepts: a
+sixth ID in a single filter is rejected outright with
+`-32602: filter 1 invalid: maximum 5
+contract IDs per filter`. The watch list therefore grows into a
+constraint rather than staying a convenience — past five groups, the second discovery pass has more
+contracts to watch than one filter can carry, and every run fails until the list is split. Reading
+the chunks one after another keeps the load on a shared public endpoint predictable, and
+de-duplicating the list first stops a repeated address from spending one of the five slots.
+
 ### Watching a group
 
 The Factory deploys each group as its own contract, so a group's events are emitted by an address
@@ -124,6 +133,14 @@ something else is wrong.
 A group that has never been derived is not reported as divergent. Discovery writes placeholder
 figures, so the first derivation always differs from them, and treating that as drift would bury the
 real signal in first-run noise. `last_event_ledger` is the marker: zero means no derivation has run.
+
+Writing the derived figures is an `UPDATE`, and it cannot be an upsert. Postgres checks a row's
+`NOT NULL` constraints against the tuple an `INSERT` proposes _before_ it resolves `ON CONFLICT`
+against an existing row, and `groups` holds the group's identity — factory, id, creator, token,
+terms — as `NOT NULL` columns with no defaults. Reconciliation knows only the derived figures, so an
+upsert fails on the first row with `null value in column "factory_contract_id"` even though the
+conflicting row exists and already holds every one of those values. Updating also states the intent
+honestly: reconciliation corrects a group discovery has already recorded, and it never creates one.
 
 ## Storage
 
