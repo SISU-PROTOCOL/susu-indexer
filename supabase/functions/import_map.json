@@ -1,0 +1,6 @@
+{
+  "imports": {
+    "@supabase/supabase-js": "npm:@supabase/supabase-js@2.116.0",
+    "@stellar/stellar-sdk": "npm:@stellar/stellar-sdk@17.0.1"
+  }
+}
