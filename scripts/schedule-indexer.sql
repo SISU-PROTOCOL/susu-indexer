@@ -86,7 +86,19 @@ revoke all on function public.invoke_indexer() from public, anon, authenticated;
 -- Adjust to the network and RPC quota. Runs overlap safely: the checkpoint only
 -- advances forward, event upserts are idempotent, and a run that finds nothing
 -- new exits without writing.
+--
+-- Re-running this script is safe. `cron.schedule` with a name that already
+-- exists would raise, and silently adding a second job under the same name would
+-- double the invocation rate, so the existing job is removed first. The guard is
+-- explicit because `cron.unschedule` errors when the name is unknown.
 -- ---------------------------------------------------------------------------
+do $$
+begin
+  if exists (select 1 from cron.job where jobname = 'susu-indexer') then
+    perform cron.unschedule('susu-indexer');
+  end if;
+end $$;
+
 select cron.schedule(
   'susu-indexer',
   '*/5 * * * *',

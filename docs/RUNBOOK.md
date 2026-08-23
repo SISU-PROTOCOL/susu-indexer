@@ -19,6 +19,12 @@ disagree, the chain is correct and the index is repaired — never the other way
 A checkpoint that stops advancing, or a growing lag, means scheduled runs are failing or cannot keep
 up.
 
+**The lag has a hard ceiling, and it is the one number worth alerting on.** Soroban RPC only serves
+events from a rolling window (7 days on Testnet, which at 5s per ledger is roughly 120,000 ledgers).
+A lag approaching that window is not a performance problem, it is a deadline: past it, runs cannot
+succeed at all, and the events that fell out of the window are gone permanently. See
+[the checkpoint fell behind retention](#the-checkpoint-fell-behind-the-rpcs-retention-window).
+
 ## Procedures
 
 ### The checkpoint is stale
@@ -74,18 +80,66 @@ visible, so a rebuild is required. Two distinct faults produce the same symptom:
 - the range was read incompletely, so some of its events were never fetched.
 
 1. Confirm the group exists on-chain and note its creation ledger.
-2. Reset the checkpoint to the ledger **before** that group's creation ledger (see below).
+2. Reset the checkpoint to the ledger **before** that group's creation ledger (see below), provided
+   that ledger is not below the RPC's retention floor — if it is, the creation event is already gone
+   and the group cannot be rediscovered; see
+   [the checkpoint fell behind retention](#the-checkpoint-fell-behind-the-rpcs-retention-window).
 3. Let runs work forward, then confirm the group appears in `groups` with its facts in
    `group_members`, `contributions`, `payouts` and `protocol_fees`.
 
+### The checkpoint fell behind the RPC's retention window
+
+The RPC serves events only from a rolling window, and it rejects — rather than truncates — a request
+that starts before it:
+
+```
+-32600: startLedger must be within the ledger range: 4525191 - 4646150
+```
+
+The whole request fails, including the part of the range that is still available. So once
+`last_processed_ledger` sits below the window's floor, **every run fails and keeps failing**;
+nothing advances the checkpoint, and the gap only grows. The error names both bounds, which is the
+quickest way to read the current floor without the dashboard.
+
+This is a permanent-loss situation, not a delay. The events between the old checkpoint and the floor
+are no longer obtainable from this RPC, so no retry and no rebuild can recover them.
+
+To recover:
+
+1. Confirm the low edge of the window from the error above.
+2. Reset the checkpoint to the floor itself, never below it:
+   ```sql
+   update public.indexer_checkpoints
+   set last_processed_ledger = :retention_floor - 1,
+       start_ledger = :retention_floor
+   where id = 'default';
+   ```
+3. Record the gap. Every event in it is missing, and a group whose creation fell inside it has no
+   `groups` row and will never be discovered, because discovery reads the Factory's `group_created`
+   event and that event is gone. If a group is missing, it has to be seeded from chain state
+   directly; there is nothing to re-index.
+4. Treat the derived figures for any group that was active across the gap as suspect. Totals are
+   recomputed from recorded facts, so a missing contribution is silently absent from the sum rather
+   than flagged. Compare against chain state before trusting them.
+
+Prevention is the point: alert on lag well before it reaches the window, and never let a schedule
+stay paused for longer than it.
+
 ### Full rebuild
 
-1. Note the Factory deployment ledger.
+A rebuild can only reach back as far as the retention floor, not to the Factory's deployment ledger.
+If the deployment is older than the window, the first ledgers are unreachable and the rebuild is
+**partial** — read
+[the checkpoint fell behind retention](#the-checkpoint-fell-behind-the-rpcs-retention-window) first,
+and follow its step 3 for any group created before the floor.
+
+1. Note the Factory deployment ledger, and compare it to the retention floor. Use whichever is later
+   — a start ledger below the floor guarantees failure.
 2. Reset the checkpoint:
    ```sql
    update public.indexer_checkpoints
-   set last_processed_ledger = :deployment_ledger - 1,
-       start_ledger = :deployment_ledger
+   set last_processed_ledger = :start_ledger - 1,
+       start_ledger = :start_ledger
    where id = 'default';
    ```
 3. Let scheduled runs work through the history. Progress is durable between runs.
