@@ -5,11 +5,15 @@
 Scheduled blockchain indexer for **Susu Protocol**. It reads Soroban contract events, records them
 idempotently in PostgreSQL, and maintains a resumable checkpoint.
 
-> **Status: Phase 5 code complete, not yet deployed.** The pipeline decodes every event the
-> contracts emit against bytes captured from Testnet, discovers each group contract from the
-> Factory's announcements, projects those events into chain-derived tables and recomputes each
-> group's state from the facts. What is unproven is the deployment path: this has not yet run
-> against a live Supabase project and a live RPC. Nothing here is audited.
+> **Status: Phase 5 deployed and running on Testnet.** The function is deployed to Supabase and
+> invoked by `pg_cron` every five minutes; it has indexed 299 events from 11 groups, and the
+> checkpoint advances on schedule. The pipeline decodes every event the contracts emit against bytes
+> captured from Testnet, discovers each group contract from the Factory's announcements, projects
+> those events into chain-derived tables and recomputes each group's state from the facts.
+> Deployment surfaced three faults that no stubbed test could reach — the RPC's
+> five-contracts-per-filter limit, a reconciliation upsert that Postgres rejects before it resolves
+> the conflict, and an age-out window that makes a stale checkpoint unrecoverable — all three are
+> fixed. Nothing here is audited, and the retry path has been exercised only by hand.
 
 ## What it is not
 
@@ -126,12 +130,38 @@ deno task lint
 deno task test
 ```
 
+## Deploying
+
+`scripts/deploy-indexer.sh` deploys the function and records its configuration in one idempotent
+step, so it is also how a change ships. It needs a personal access token (`sbp_…`) from
+[Account → Access Tokens](https://supabase.com/dashboard/account/tokens) — not the anon or
+service-role key, which are project-scoped and cannot deploy anything.
+
+```bash
+export SUPABASE_ACCESS_TOKEN=sbp_...
+export SUPABASE_PROJECT_REF=...
+export INDEXER_TASK_SECRET=$(openssl rand -hex 32)
+export FACTORY_CONTRACT_ID=C...
+export TOKEN_CONTRACT_ID=C...
+export INDEXER_START_LEDGER=...
+./scripts/deploy-indexer.sh
+```
+
+Two steps the script cannot do for you, both needing database access, are printed when it finishes:
+storing the invocation secret in Vault, and applying `scripts/schedule-indexer.sql`.
+
+`TOKEN_CONTRACT_ID` is the asset the groups actually transact in, and it is not always what
+`.env.testnet` records. Testnet deployments built by `e2e-testnet.sh` use a self-issued test asset,
+so pointing this at the real USDC SAC makes the indexer watch a contract the groups never touch —
+silently, since the run still succeeds.
+
 ## Operations
 
 - **Stale checkpoint:** check `indexer_runs` for failures, then confirm RPC reachability. Restarting
   resumes from the checkpoint automatically.
-- **Full rebuild:** reset `indexer_checkpoints` to the deployment ledger and let the indexer
-  re-scan. Event identity makes this safe.
+- **Full rebuild:** reset `indexer_checkpoints` to the later of the deployment ledger and the RPC's
+  retention floor, then let the indexer re-scan. Event identity makes this safe. A start ledger
+  below the retention floor fails every run instead of rebuilding — see `docs/RUNBOOK.md`.
 - **Groups missing from the index:** a group is only learned from the Factory's `group_created`
   event inside a range that is read. If that range was processed before group discovery existed, its
   events were never read and the checkpoint has moved past them — only a rebuild re-reads them.

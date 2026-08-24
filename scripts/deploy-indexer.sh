@@ -5,10 +5,11 @@
 # Idempotent: re-running redeploys the same code and re-sets the same secrets, so
 # it is also the procedure for shipping a change.
 #
-# NO SECRET IS EVER PASSED ON THE COMMAND LINE. `supabase secrets set` is given
-# its values through the environment, so nothing sensitive reaches shell history,
-# `ps` output, or the CI log. For the same reason this script prints variable
-# NAMES and never values.
+# NO SECRET IS EVER PASSED AS A COMMAND ARGUMENT. On macOS and Linux an
+# argument is readable by any process that can read `ps`, so a value handed to
+# `supabase` that way is exposed for the lifetime of the call. Secrets travel
+# through the environment or through 0600 files that are removed on exit. For the
+# same reason this script prints variable NAMES and never values.
 #
 # Usage:
 #   export SUPABASE_ACCESS_TOKEN=sbp_...        # personal access token
@@ -116,18 +117,34 @@ supabase functions deploy "$FUNCTION_NAME" \
   --use-api
 
 printf '\n==> Setting function secrets\n'
-# Passed via the environment so the values never appear in the process arguments.
+# Values are read from a file rather than passed as `NAME=value` arguments. An
+# argument is visible to any process that can read `ps`, which is exactly the
+# kind of incidental exposure a secret should not have. The file is written 0600
+# and removed on exit, including on failure.
+#
+# SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are deliberately absent: the
+# platform injects them, and setting them here would shadow the managed values
+# with stale copies.
+secrets_file="$(mktemp)"
+chmod 600 "$secrets_file"
+trap 'rm -f "$secrets_file"' EXIT
+
+{
+  printf 'INDEXER_TASK_SECRET=%s\n' "$INDEXER_TASK_SECRET"
+  printf 'FACTORY_CONTRACT_ID=%s\n' "$FACTORY_CONTRACT_ID"
+  printf 'USDC_CONTRACT_ID=%s\n' "$TOKEN_CONTRACT_ID"
+  printf 'INDEXER_START_LEDGER=%s\n' "$INDEXER_START_LEDGER"
+  printf 'STELLAR_RPC_URL=%s\n' "${STELLAR_RPC_URL:-https://soroban-testnet.stellar.org}"
+  printf 'STELLAR_NETWORK=%s\n' "${STELLAR_NETWORK:-testnet}"
+  printf 'STELLAR_NETWORK_PASSPHRASE="%s"\n' \
+    "${STELLAR_NETWORK_PASSPHRASE:-Test SDF Network ; September 2015}"
+  printf 'INDEXER_MAX_LEDGER_RANGE=%s\n' "${INDEXER_MAX_LEDGER_RANGE:-1000}"
+  printf 'ALLOW_MAINNET=%s\n' "${ALLOW_MAINNET:-false}"
+} >"$secrets_file"
+
 supabase secrets set \
   --project-ref "$SUPABASE_PROJECT_REF" \
-  INDEXER_TASK_SECRET="$INDEXER_TASK_SECRET" \
-  FACTORY_CONTRACT_ID="$FACTORY_CONTRACT_ID" \
-  USDC_CONTRACT_ID="$TOKEN_CONTRACT_ID" \
-  INDEXER_START_LEDGER="$INDEXER_START_LEDGER" \
-  STELLAR_RPC_URL="${STELLAR_RPC_URL:-https://soroban-testnet.stellar.org}" \
-  STELLAR_NETWORK="${STELLAR_NETWORK:-testnet}" \
-  "STELLAR_NETWORK_PASSPHRASE=${STELLAR_NETWORK_PASSPHRASE:-Test SDF Network ; September 2015}" \
-  INDEXER_MAX_LEDGER_RANGE="${INDEXER_MAX_LEDGER_RANGE:-1000}" \
-  ALLOW_MAINNET="${ALLOW_MAINNET:-false}"
+  --env-file "$secrets_file"
 
 printf '\n==> Deployed.\n\n'
 cat <<'NEXT'
