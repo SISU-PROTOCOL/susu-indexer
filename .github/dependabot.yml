@@ -1,0 +1,26 @@
+version: 2
+#
+# Automated dependency updates.
+#
+# WHY THERE IS NO PACKAGE ECOSYSTEM ENTRY HERE
+# Dependabot has no `deno` ecosystem, and this repository's dependencies are
+# managed by `deno.json` and `deno.lock` rather than a `package.json`. An npm
+# entry pointed at this directory would find nothing to update, which is worse
+# than no entry: it looks like coverage.
+#
+# So the runtime dependencies here are updated by hand, and the thing that makes
+# that safe is the lockfile — `deno.lock` is committed, and Deno refuses to run
+# with a lockfile that does not match the configuration, so a floating version
+# cannot silently become something else. What is left uncovered is a dependency
+# acquiring a known advisory without a version change, which is exactly what the
+# indexer's own deployment checks are for.
+#
+# The actions below are covered, because a pinned action going stale is a
+# supply-chain risk in the same way a library is and this is the job that would
+# otherwise be nobody's.
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
