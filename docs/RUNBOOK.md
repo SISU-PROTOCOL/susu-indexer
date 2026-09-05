@@ -11,6 +11,8 @@ disagree, the chain is correct and the index is repaired — never the other way
 
 - **Checkpoint:** `select * from indexer_checkpoints;`
 - **Lag:** compare `last_processed_ledger` to the network's current ledger.
+- **Open alerts:**
+  `select kind, subject, detail, opened_at, notified_at from indexer_alerts where resolved_at is null order by opened_at desc;`
 - **Failed runs:**
   `select * from indexer_runs where status = 'failed' order by created_at desc limit 20;`
 - **Cron history:**
@@ -24,6 +26,73 @@ events from a rolling window (7 days on Testnet, which at 5s per ledger is rough
 A lag approaching that window is not a performance problem, it is a deadline: past it, runs cannot
 succeed at all, and the events that fell out of the window are gone permanently. See
 [the checkpoint fell behind retention](#the-checkpoint-fell-behind-the-rpcs-retention-window).
+
+## Alerts, and what they are for
+
+The lag above is the number that matters, so something has to be watching it rather than waiting for
+someone to look. `public.check_indexer_health()` runs every fifteen minutes under the
+`susu-indexer-health` cron job and watches three conditions:
+
+| Kind               | What it means                                                             |
+| ------------------ | ------------------------------------------------------------------------- |
+| `stale_checkpoint` | The checkpoint has not advanced in 30 minutes — three missed runs         |
+| `failed_run`       | The indexer recorded a failure in the last hour, with its reason          |
+| `failed_schedule`  | A scheduled invocation did not succeed, including ones that never started |
+
+Staleness is checked before lag on purpose. It needs no RPC, no secret and no quota, and a
+checkpoint that stops moving is how lag grows in the first place — so this notices the problem while
+fixing it is still trivial.
+
+**One alert per condition, not one per check.** A partial unique index permits a single open row per
+`(kind, subject)`, so a condition that is still true refreshes that row's detail instead of opening
+another, and a condition that clears resolves the row rather than deleting it. The check can
+therefore run as often as anything likes and the result is the same. History stays readable: what
+broke, what it said, and when it stopped.
+
+To see what is open, and whether anyone was told:
+
+```sql
+select kind, subject, detail, opened_at, notified_at
+from public.indexer_alerts
+where resolved_at is null
+order by opened_at desc;
+```
+
+There is no acknowledgement step. An alert closes when the condition closes, and a condition that
+keeps recurring is telling you it was never fixed.
+
+### Being told rather than looking
+
+Recording an alert is not the same as delivering one. To have alerts delivered, store a webhook URL
+in Vault — a chat channel's incoming webhook is enough:
+
+```sql
+select vault.create_secret('<webhook-url>', 'indexer_alert_webhook',
+                           'Where indexer health alerts are posted');
+```
+
+A newly opened alert is then posted there once, and its `notified_at` is set. If no webhook is
+stored, **alerts are still recorded and nothing is sent** — an open alert with a null `notified_at`
+is one nobody was told about. That is the difference between having alerting and having a table.
+
+### Running the check by hand
+
+```sql
+select * from public.check_indexer_health();                    -- real thresholds, delivers
+select * from public.check_indexer_health('0 seconds', '1 hour', false);  -- trips the stale check
+```
+
+The second form makes the staleness threshold zero, so the current checkpoint trips it. Inside a
+transaction that is rolled back, it is a safe way to confirm detection works on a healthy system.
+The returned row counts what the run opened, resolved, left open, and notified.
+
+### The alert functions are not for browsers
+
+`check_indexer_health()` is `security definer`, because it reads `cron.job_run_details` and
+`vault.decrypted_secrets`, which `service_role` cannot read for itself. Its `search_path` is
+therefore fixed, and `execute` is revoked from `public`, `anon` and `authenticated` — a definer
+function with a caller-controlled `search_path` is a privilege escalation, and one that any browser
+can call is a liability.
 
 ## Procedures
 

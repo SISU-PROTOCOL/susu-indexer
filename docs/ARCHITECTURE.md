@@ -150,7 +150,20 @@ Operational tables:
 | --------------------- | -------------------------------------------------------- |
 | `indexer_checkpoints` | Last fully processed ledger and rebuild origin           |
 | `indexed_events`      | Raw chain events, deduplicated by chain-derived identity |
-| `indexer_runs`        | Append-only run log for monitoring and alerting          |
+| `indexer_runs`        | Append-only log of **failures**, for monitoring          |
+| `indexer_alerts`      | One row per health condition, open until it clears       |
+
+`indexer_runs` records failures only, on purpose: the run log exists so a failure's reason is
+readable, and a successful run leaves its evidence in `indexer_checkpoints.updated_at` advancing.
+That makes the checkpoint's timestamp the liveness heartbeat — a stopped indexer is one whose
+checkpoint stops moving.
+
+`indexer_alerts` is written by `check_indexer_health()`, scheduled every fifteen minutes. It watches
+three conditions — a stale checkpoint, a recorded failure, and a scheduled invocation that did not
+succeed — and holds exactly one open row per condition, refreshing it while the condition persists
+and resolving it when it clears. Open rows with a null `notified_at` are alerts nobody was told
+about, which happens when no webhook is configured. See
+[the runbook](RUNBOOK.md#alerts-and-what-they-are-for).
 
 Chain-derived tables, each rebuildable from the one before it:
 
