@@ -4,8 +4,8 @@
 
 [![CI](https://github.com/susu-labs/susu-indexer/actions/workflows/ci.yml/badge.svg)](https://github.com/susu-labs/susu-indexer/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Status: Testnet beta](https://img.shields.io/badge/status-testnet%20beta-orange.svg)](#project-status)
-[![Audit: not yet reviewed](https://img.shields.io/badge/audit-not%20yet%20reviewed-critical.svg)](#security)
+[![Status: Testnet · reviewed](https://img.shields.io/badge/status-testnet%20%C2%B7%20reviewed-orange.svg)](#project-status)
+[![Mainnet: readiness implemented · deployment gated](https://img.shields.io/badge/mainnet-readiness%20implemented%20%C2%B7%20deployment%20gated-yellow.svg)](#project-status)
 
 A scheduled blockchain indexer for **Susu Protocol**. It reads Soroban contract events, records them
 idempotently in PostgreSQL, and maintains a resumable checkpoint.
@@ -13,8 +13,10 @@ idempotently in PostgreSQL, and maintains a resumable checkpoint.
 It is a **reader of the chain and a writer to index tables** — never a financial authority, and it
 can be deleted and rebuilt from history without affecting a single balance.
 
-> **This code is unaudited and not mainnet-ready.** It is deployed to Testnet, where the balances
-> are worthless. Read [Project status](#project-status) before you read anything else.
+> **Reviewed by the maintainer, and not independently audited.** It is deployed to Testnet, where
+> the balances are worthless. Mainnet readiness is implemented and mechanically verified, but
+> deployment is deliberately gated until the attestations are satisfied. Read
+> [Project status](#project-status) before you read anything else.
 
 ---
 
@@ -34,7 +36,8 @@ service is wrong.
 
 ## Project status
 
-**Testnet beta. Not audited. Not mainnet-ready.**
+**Testnet. Reviewed by the maintainer. Mainnet readiness implemented — deployment gated on
+attestations.**
 
 All twelve planned build phases are implemented. This function is deployed to Supabase and invoked
 by `pg_cron` on a fixed schedule; the checkpoint advances on schedule, and a health check runs under
@@ -48,12 +51,12 @@ fixed, and all three are the kind of bug that only appears against a real RPC.
 The retry path has been exercised by hand rather than by an automated failure-injection test. That
 is a known gap, not a claim.
 
-Two things stand between this and mainnet. Neither of them is code:
+Two gates stand between this and Mainnet. The machinery for both is written; neither is satisfied:
 
-| Gate                            | State                                                                                                                                                                                  |
-| ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Independent security review** | **Not commissioned.** See [`susu-contracts/docs/AUDIT_SCOPE.md`](https://github.com/susu-labs/susu-contracts/blob/main/docs/AUDIT_SCOPE.md).                                           |
-| **Mainnet readiness**           | **Implemented, and currently `NO-GO` — by design.** See [`susu-contracts/docs/MAINNET_READINESS.md`](https://github.com/susu-labs/susu-contracts/blob/main/docs/MAINNET_READINESS.md). |
+| Gate                            | State                                                                                                                                                                                                                       |
+| ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Independent security review** | **Not commissioned. The maintainer has reviewed this code, which is a different claim.** See [`susu-contracts/docs/AUDIT_SCOPE.md`](https://github.com/susu-labs/susu-contracts/blob/main/docs/AUDIT_SCOPE.md).             |
+| **Mainnet readiness**           | **Implemented and mechanically verified; `NO-GO` until the attestations are satisfied.** See [`susu-contracts/docs/MAINNET_READINESS.md`](https://github.com/susu-labs/susu-contracts/blob/main/docs/MAINNET_READINESS.md). |
 
 ## Contents
 
@@ -244,7 +247,8 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md) and the [`CODE_OF_CONDUCT.md`](CODE_OF_
 
 ## Security
 
-Unaudited. See [`SECURITY.md`](SECURITY.md) for reporting.
+Reviewed by the maintainer, not by an independent auditor. See [`SECURITY.md`](SECURITY.md) for
+reporting.
 
 ## License
 
