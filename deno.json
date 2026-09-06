@@ -16,7 +16,7 @@
     "indentWidth": 2,
     "semiColons": true,
     "singleQuote": true,
-    "exclude": ["coverage", "supabase/migrations"]
+    "exclude": ["coverage", "supabase/migrations", "assets"]
   },
   "lint": {
     "rules": {

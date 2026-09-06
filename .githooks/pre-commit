@@ -1,0 +1,94 @@
+#!/bin/sh
+#
+# Fast pre-commit checks for susu-indexer: `deno fmt --check` and `deno lint`.
+#
+# Installed by `scripts/setup-hooks.sh`; see `.githooks/commit-msg` for why the
+# hooks live in `.githooks/` instead of `.git/hooks/`.
+#
+# Two rules govern this hook, and both matter more than coverage does:
+#
+#   1. It must never block someone who lacks the toolchain. No deno, no check —
+#      skip with a message and let the commit through. CI is what enforces the
+#      checks; this is a courtesy to the committer.
+#   2. It must be fast. Both commands are local and parse-only, so neither
+#      touches the network nor resolves dependencies. `deno test` is deliberately
+#      absent: the suite reaches for Postgres and a Stellar RPC, which is CI's job.
+
+cd "$(git rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null || exit 0
+[ -f deno.json ] || exit 0
+
+# Paths `deno fmt` handles here, and the subset `deno lint` handles. Kept in step
+# with the "fmt" and "lint" configuration in deno.json.
+staged_fmt=$(git diff --cached --name-only --diff-filter=ACMR -- \
+  '*.ts' '*.tsx' '*.js' '*.jsx' '*.mjs' '*.cjs' '*.json' '*.jsonc' '*.md' 2>/dev/null)
+staged_lint=$(git diff --cached --name-only --diff-filter=ACMR -- \
+  '*.ts' '*.tsx' '*.js' '*.jsx' '*.mjs' '*.cjs' 2>/dev/null)
+
+[ -n "$staged_fmt" ] || [ -n "$staged_lint" ] || exit 0
+
+if ! command -v deno >/dev/null 2>&1; then
+  echo "pre-commit: deno not found — skipping deno fmt and deno lint." >&2
+  echo "pre-commit: install it from https://deno.land to have these checks run locally." >&2
+  exit 0
+fi
+
+# Strip paths that are no longer on disk. A path can be staged and then removed
+# from the working tree without restaging it, and deno exits non-zero on a
+# missing argument — which would block the commit for a reason that has nothing
+# to do with the commit.
+existing_files() {
+  printf '%s\n' "$1" | while IFS= read -r path; do
+    if [ -n "$path" ] && [ -f "$path" ]; then
+      printf '%s\n' "$path"
+    fi
+  done
+}
+
+# Hand the file list to deno as positional parameters, with the field separator
+# set to a newline and globbing off, so a path containing a space or a bracket
+# survives intact.
+deno_fmt_check() {
+  set -f
+  old_ifs=$IFS
+  IFS='
+'
+  # shellcheck disable=SC2086 # intentional: newline-separated list, globbing off
+  set -- $1
+  IFS=$old_ifs
+  [ "$#" -gt 0 ] || return 0
+  deno fmt --check "$@"
+}
+
+deno_lint_check() {
+  set -f
+  old_ifs=$IFS
+  IFS='
+'
+  # shellcheck disable=SC2086 # intentional: newline-separated list, globbing off
+  set -- $1
+  IFS=$old_ifs
+  [ "$#" -gt 0 ] || return 0
+  deno lint "$@"
+}
+
+# Scoped to the staged paths, never the whole repository: a bare
+# `deno fmt --check` reports pre-existing drift in files this commit does not
+# touch, which is CI's business and not a reason to block a commit.
+fmt_paths=$(existing_files "$staged_fmt")
+if [ -n "$fmt_paths" ] && ! deno_fmt_check "$fmt_paths"; then
+  echo >&2
+  echo "pre-commit: formatting check failed." >&2
+  echo "pre-commit: run 'deno fmt <the files listed above>', stage the result," >&2
+  echo "pre-commit: and commit again." >&2
+  exit 1
+fi
+
+lint_paths=$(existing_files "$staged_lint")
+if [ -n "$lint_paths" ] && ! deno_lint_check "$lint_paths"; then
+  echo >&2
+  echo "pre-commit: lint failed." >&2
+  echo "pre-commit: run 'deno lint <the files listed above>' and fix what it reports." >&2
+  exit 1
+fi
+
+exit 0

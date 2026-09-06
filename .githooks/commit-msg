@@ -1,0 +1,111 @@
+#!/bin/sh
+#
+# Strip the "Co-authored-by: Cursor" trailer that this development environment
+# injects into commit messages.
+#
+# This is committed project code, not a local file. The same logic used to live
+# in an uncommitted `.git/hooks/commit-msg`, which meant a fresh clone had no
+# protection, the file could be deleted without `git status` noticing, and
+# nobody could review what it did. It now lives in `.githooks/`, which is
+# tracked, reviewed, and installed by `scripts/setup-hooks.sh`.
+#
+# $1 is the path to the message file git has already written and will use as-is
+# once this hook exits, so rewriting it here means the trailer never reaches the
+# commit object — whichever code path produced the message.
+#
+# Only that trailer is removed. `Co-authored-by: dependabot` and every other
+# trailer are left untouched, as is every other line of the message. A trailer is
+# recognised as a whole line beginning with "Co-authored-by: Cursor", optionally
+# followed by an address in angle brackets — the same shape the uncommitted perl
+# hook matched (which required the exact cursoragent@cursor.com address), plus a
+# bare "Co-authored-by: Cursor" line.
+#
+# Portability and safety, both deliberate:
+#
+#   * POSIX sh with `awk` and `tail` only. No perl, so it behaves identically on
+#     macOS, Linux, and Git for Windows.
+#   * No escape sequence appears inside an awk regex literal. POSIX leaves `\r`
+#     and `\t` undefined there, and the enforcement differs in practice — an awk
+#     that reads `\r` as a plain "r" would strip a trailing "r" off a line, which
+#     is exactly the kind of silent message corruption this hook must not cause.
+#     The CR and TAB characters are built with sprintf instead.
+#   * It NEVER fails a commit. Every step that can fail (a missing message file,
+#     an unwritable temp file, a failing rewrite) exits 0 and leaves the message
+#     alone. A hook that can block a commit for a cosmetic reason gets bypassed
+#     with --no-verify and then protects nothing at all.
+
+msg_file=${1:-}
+[ -n "$msg_file" ] || exit 0
+[ -f "$msg_file" ] || exit 0
+
+# git terminates the message file with a newline. If it somehow does not, the
+# rewrite must not invent one. `$(...)` strips trailing newlines, so an empty
+# result means the last byte was one.
+last_byte=$(tail -c 1 "$msg_file" 2>/dev/null)
+if [ -n "$last_byte" ]; then
+  final_newline=0
+else
+  final_newline=1
+fi
+
+tmp_file=$(mktemp "${TMPDIR:-/tmp}/susu-commit-msg.XXXXXX" 2>/dev/null) ||
+  tmp_file="${msg_file}.susu.$$"
+trap 'rm -f "$tmp_file"' EXIT HUP INT TERM
+
+awk -v final_newline="$final_newline" '
+  BEGIN {
+    # Built rather than written as escapes: see the note at the top of the file.
+    cr = sprintf("%c", 13)
+    tab = sprintf("%c", 9)
+  }
+
+  # Buffer the message first: the trailing-blank-line rule below needs to know
+  # which line was last, which is only known once the file has been read.
+  {
+    raw[NR] = $0
+    line = $0
+    if (length(line) > 0 && substr(line, length(line), 1) == cr) {
+      line = substr(line, 1, length(line) - 1)      # tolerate a CRLF message file
+    }
+    if (line == "Co-authored-by: Cursor" || line ~ /^Co-authored-by: Cursor <[^>]*>$/) {
+      drop[NR] = 1
+    } else if (line ~ "^[ " tab "]*$") {
+      blank[NR] = 1
+    }
+  }
+
+  END {
+    # Find the last line worth keeping, then emit only up to it, so trailing
+    # blank lines collapse to a single newline the way the hook this replaces
+    # did. Blank lines *inside* the message are preserved.
+    last = 0
+    for (i = NR; i >= 1; i--) {
+      if (!drop[i] && !blank[i]) { last = i; break }
+    }
+
+    if (last == 0) {
+      # Degenerate: nothing but the trailer, or nothing but blank lines. Leave
+      # git an empty message to reject on its own terms rather than inventing
+      # content. This mirrors the perl hook exactly — a message left with at
+      # least one line collapses to a single newline, and one where every line
+      # was the trailer becomes empty.
+      every_line_dropped = 1
+      for (i = 1; i <= NR; i++) {
+        if (!drop[i]) { every_line_dropped = 0; break }
+      }
+      if (!every_line_dropped && NR > 0 && final_newline == 1) printf "\n"
+      exit
+    }
+
+    for (i = 1; i <= last; i++) {
+      if (drop[i]) continue
+      if (i == last && final_newline == 0) printf "%s", raw[i]
+      else printf "%s\n", raw[i]
+    }
+  }
+' "$msg_file" > "$tmp_file" 2>/dev/null || exit 0
+
+# Rewrite in place, so the message file keeps its inode and permissions.
+cat "$tmp_file" > "$msg_file" 2>/dev/null || exit 0
+
+exit 0
