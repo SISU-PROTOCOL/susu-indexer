@@ -1,6 +1,6 @@
 # Susu Protocol — Indexer
 
-[![CI](https://github.com/SISU-PROTOCOL/susu-indexer/actions/workflows/ci.yml/badge.svg)](https://github.com/SISU-PROTOCOL/susu-indexer/actions/workflows/ci.yml)
+[![CI](https://github.com/susu-labs/susu-indexer/actions/workflows/ci.yml/badge.svg)](https://github.com/susu-labs/susu-indexer/actions/workflows/ci.yml)
 
 Scheduled blockchain indexer for **Susu Protocol**. It reads Soroban contract events, records them
 idempotently in PostgreSQL, and maintains a resumable checkpoint.
