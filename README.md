@@ -1,19 +1,72 @@
 # Susu Protocol — Indexer
 
 [![CI](https://github.com/susu-labs/susu-indexer/actions/workflows/ci.yml/badge.svg)](https://github.com/susu-labs/susu-indexer/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Status: Testnet beta](https://img.shields.io/badge/status-testnet%20beta-orange.svg)](#project-status)
+[![Audit: not yet reviewed](https://img.shields.io/badge/audit-not%20yet%20reviewed-critical.svg)](#security)
 
-Scheduled blockchain indexer for **Susu Protocol**. It reads Soroban contract events, records them
+A scheduled blockchain indexer for **Susu Protocol**. It reads Soroban contract events, records them
 idempotently in PostgreSQL, and maintains a resumable checkpoint.
 
-> **Status: Phase 5 deployed and running on Testnet.** The function is deployed to Supabase and
-> invoked by `pg_cron` every five minutes; it has indexed 299 events from 11 groups, and the
-> checkpoint advances on schedule. The pipeline decodes every event the contracts emit against bytes
-> captured from Testnet, discovers each group contract from the Factory's announcements, projects
-> those events into chain-derived tables and recomputes each group's state from the facts.
-> Deployment surfaced three faults that no stubbed test could reach — the RPC's
-> five-contracts-per-filter limit, a reconciliation upsert that Postgres rejects before it resolves
-> the conflict, and an age-out window that makes a stale checkpoint unrecoverable — all three are
-> fixed. Nothing here is audited, and the retry path has been exercised only by hand.
+It is a **reader of the chain and a writer to index tables** — never a financial authority, and it
+can be deleted and rebuilt from history without affecting a single balance.
+
+> **This code is unaudited and not mainnet-ready.** It is deployed to Testnet, where the balances
+> are worthless. Read [Project status](#project-status) before you read anything else.
+
+---
+
+## The system
+
+Susu is four repositories. This one makes the chain queryable.
+
+| Repository                                                      | Responsibility                                                         | Runs on                     |
+| --------------------------------------------------------------- | ---------------------------------------------------------------------- | --------------------------- |
+| [`susu-contracts`](https://github.com/susu-labs/susu-contracts) | Soroban contracts. The financial authority.                            | **Testnet**                 |
+| **`susu-indexer`** _(you are here)_                             | Reads chain events, records them in Postgres on a schedule.            | **Testnet** (Supabase Cron) |
+| [`susu-api`](https://github.com/susu-labs/susu-api)             | Read model, accounts, invites, notifications, transaction preparation. | Local                       |
+| [`susu-web`](https://github.com/susu-labs/susu-web)             | The client.                                                            | Local                       |
+
+The index is a **rebuildable cache**. If it disagrees with the chain, the chain wins and this
+service is wrong.
+
+## Project status
+
+**Testnet beta. Not audited. Not mainnet-ready.**
+
+All twelve planned build phases are implemented. This function is deployed to Supabase and invoked
+by `pg_cron` on a fixed schedule; the checkpoint advances on schedule, and a health check runs under
+its own cron job and raises an alert when progress stalls.
+
+Deployment surfaced three faults that no stubbed test could reach — the RPC's
+five-contracts-per-filter limit, a reconciliation upsert that Postgres rejects before it resolves
+the conflict, and an age-out window that makes a stale checkpoint unrecoverable. All three are
+fixed, and all three are the kind of bug that only appears against a real RPC.
+
+The retry path has been exercised by hand rather than by an automated failure-injection test. That
+is a known gap, not a claim.
+
+Two things stand between this and mainnet. Neither of them is code:
+
+| Gate                            | State                                                                                                                                                                                  |
+| ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Independent security review** | **Not commissioned.** See [`susu-contracts/docs/AUDIT_SCOPE.md`](https://github.com/susu-labs/susu-contracts/blob/main/docs/AUDIT_SCOPE.md).                                           |
+| **Mainnet readiness**           | **Implemented, and currently `NO-GO` — by design.** See [`susu-contracts/docs/MAINNET_READINESS.md`](https://github.com/susu-labs/susu-contracts/blob/main/docs/MAINNET_READINESS.md). |
+
+## Contents
+
+- [What it is not](#what-it-is-not)
+- [Why these design choices](#why-these-design-choices)
+- [Layout](#layout)
+- [Money](#money)
+- [Database security](#database-security)
+- [Development](#development)
+- [Deploying](#deploying)
+- [Operations](#operations)
+- [Documentation](#documentation)
+- [Contributing](#contributing)
+- [Security](#security)
+- [License](#license)
 
 ## What it is not
 
@@ -89,7 +142,7 @@ supabase/
       scan.ts               # reads a ledger range in full, by cursor
       state.ts              # derives group state from recorded facts
       stellar.ts            # minimal read-only Soroban RPC client
-  migrations/               # schema, RLS, grants
+  migrations/               # schema, RLS, grants, alerts
 scripts/
   schedule-indexer.sql      # cron schedule (reads its secret from Vault)
 tests/                      # Deno tests
@@ -157,12 +210,12 @@ silently, since the run still succeeds.
 
 ## Operations
 
-- **Alerts:** `check_indexer_health()` runs every fifteen minutes under the `susu-indexer-health`
-  cron job and opens one row in `indexer_alerts` per condition — a stale checkpoint, a recorded
-  failure, or a scheduled invocation that did not succeed. One alert per condition rather than one
-  per check, so it does not become noise, and it resolves when the condition clears. Without a
-  webhook stored in Vault the alerts are recorded but not delivered, which means the table has to be
-  looked at — see [`docs/RUNBOOK.md`](docs/RUNBOOK.md#alerts-and-what-they-are-for).
+- **Alerts:** `check_indexer_health()` runs under its own cron job and opens one row in
+  `indexer_alerts` per condition — a stale checkpoint, a recorded failure, or a scheduled invocation
+  that did not succeed. One alert per condition rather than one per check, so it does not become
+  noise, and it resolves when the condition clears. Without a webhook stored in Vault the alerts are
+  recorded but not delivered, which means the table has to be looked at — see
+  [`docs/RUNBOOK.md`](docs/RUNBOOK.md#alerts-and-what-they-are-for).
 - **Stale checkpoint:** check `indexer_runs` for failures, then confirm RPC reachability. Restarting
   resumes from the checkpoint automatically.
 - **Full rebuild:** reset `indexer_checkpoints` to the later of the deployment ledger and the RPC's
@@ -175,6 +228,17 @@ silently, since the run still succeeds.
   and written back; divergence is logged. A difference means the index was wrong, never the chain.
 
 See [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
+
+## Documentation
+
+| Document                                       | What it covers                                                  |
+| ---------------------------------------------- | --------------------------------------------------------------- |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | The tables, the pipeline, and where idempotency is enforced.    |
+| [`docs/RUNBOOK.md`](docs/RUNBOOK.md)           | Alerts, checkpoints, rebuilds, and what to do when a run fails. |
+
+## Contributing
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) and the [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md).
 
 ## Security
 
